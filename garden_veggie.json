@@ -1,0 +1,20 @@
+{
+  "version": "1.0.0",
+  "veggies": {
+    "01CE00AAEA52": { "name": "变异南瓜", "offset": 600 },
+    "01CE00AAEA51": { "name": "变异玉米", "offset": 480 },
+    "01CE00AAEA50": { "name": "变异胡萝卜", "offset": 360 },
+    "01CE00AAE66A": { "name": "南瓜", "offset": 600 },
+    "01CE00AAE668": { "name": "胡萝卜", "offset": 360 },
+    "01CE00AAE665": { "name": "萝卜", "offset": 60 },
+    "01CE00AAE666": { "name": "小麦", "offset": 90 },
+    "01CE00AAE669": { "name": "玉米", "offset": 480 },
+    "01CE00AAE667": { "name": "白菜", "offset": 180 },
+    "01CE00AAE689": { "name": "洋葱", "offset": 60 },
+    "01CE00AAE68A": { "name": "辣椒", "offset": 60 },
+    "01CE00AAE68B": { "name": "变异大王花", "offset": 60 }
+  },
+  "patterns": {
+    "veggie_match": "00CD[0-9A-F]{4}01CE00AAE[0-9A-F]{27}06CF[0-9A-F]{16}"
+  }
+}
