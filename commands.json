@@ -1,0 +1,13 @@
+{
+  "version": "2026.03.05",
+  "gamble": {
+    "monthlyGuildReward": {
+      "bet_prize": "0D0000004B18000000287A7F8241009114",
+      "ticket_prize": "0D0000004A18000000287A7F8241009114"
+    }
+  },
+  "global_patterns": {
+    "uid_marker": "D3E50000",
+    "cooldown": "06CF[0-9A-F]{16}07CE[0-9A-F]{8}"
+  }
+}
