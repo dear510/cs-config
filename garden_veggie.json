@@ -15,7 +15,7 @@
     "01CE00AAE68B": { "name": "变异大王花", "offset": 60 },
     "01CE00AAE68C": { "name": "西兰花", "offset": 60 },
     "01CE00AAE68D": { "name": "芒果", "offset": 60 },
-    "01CE00AAE68E": { "name": "石榴", "offset": 60 },
+    "01CE00AAE68E": { "name": "石榴", "offset": 60 }
   },
   "patterns": {
     "veggie_match": "00CD[0-9A-F]{4}01CE00AAE[0-9A-F]{27}06CF[0-9A-F]{16}"
