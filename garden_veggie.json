@@ -19,6 +19,6 @@
     "01CD01F6": { "name": "黄金树", "offset": 0 }
   },
   "patterns": {
-    "veggie_match": "00CD[0-9A-F]{4}01CE00AAE[0-9A-F]{27}06CF[0-9A-F]{16}"
+    "veggie_match": "00CD[0-9A-F]{4}(01CE00AAE[0-9A-F]{27}|01CD01F6[0-9A-F]{24})06CF[0-9A-F]{16}"
   }
 }
