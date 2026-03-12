@@ -39,20 +39,28 @@ type App struct {
 	rulesPrinted       bool
 	ZhenBaoAutoRefresh bool
 
-	// --- 菜园基础数据（变异南瓜字典等） ---
-	gardenData       VeggieConfigData // 存放 veggies map 和 patterns
-	veggieTimestamps [4]int64         // 4个坑位的成熟时间戳
+	// --- 菜园基础数据 ---
+	gardenData       VeggieConfigData
+	veggieTimestamps [4]int64
 	vtMutex          sync.RWMutex
+	harvestingPos    map[string]bool // 💡 用于黄金树异步任务锁
 	lastGardenHex    string
 	veggieMutex      sync.Mutex
 
+	// --- 🔍 扫菜模块 (新增加) ---
+	scanConfig        ScanTaskConfig // 专门存放扫菜勾选的作物和名单
+	scanMutex         sync.RWMutex   // 扫菜专用的锁
+	isScanningVeggie  bool           // 扫菜开关状态
+	stopScanLoop      chan struct{}  // 停止扫菜巡逻的信号
+	isScanLoopRunning bool           // 扫菜巡逻是否正在执行
+
 	// --- 菜园挂机任务控制 ---
-	gardenTask          GardenTaskConfig // 💡 新增：存放前端传来的开关配置
-	gdMutex             sync.RWMutex     // 💡 保护 gardenData 和 gardenTask
-	stopGardenLoop      chan struct{}    // 用于停止挂机循环
-	isGardenLoopRunning bool             // 挂机状态标记
-	isEatingMeat        bool             // 正在吃肉的临时状态
-	isCheckingVeggie    bool             // 正在检查蔬菜的临时状态
+	gardenTask          GardenTaskConfig
+	gdMutex             sync.RWMutex
+	stopGardenLoop      chan struct{}
+	isGardenLoopRunning bool
+	isEatingMeat        bool
+	isCheckingVeggie    bool
 
 	// --- 远程配置 ---
 	remoteConfig RemoteConfig
@@ -60,6 +68,15 @@ type App struct {
 
 	// --- 其他任务 ---
 	isTaskRunning bool
+
+	// --- 跨区切磋 ---
+	pkTargetUID    uint32
+	pkSourceUID    uint32
+	pkTargetSrvMin uint16 // 目标起始区服
+	pkTargetSrvMax uint16 // 目标结束区服
+	pkSourceSrvMin uint16 // 源起始区服
+	pkSourceSrvMax uint16 // 源结束区服
+	isPKActive     bool
 }
 
 // NewApp creates a new App application struct
@@ -115,6 +132,14 @@ type VeggieInfo struct {
 	Offset int    `json:"offset"`
 }
 
+type Veggie struct {
+	UID        string `json:"uid"`        // 目标玩家 UID 的 16 进制 (例如: "024FA5FA")
+	Name       string `json:"name"`       // 蔬菜名称 (例如: "变异南瓜")
+	VeggieType string `json:"veggieType"` // 蔬菜品种 ID (例如: "01CD")
+	MatureTime int64  `json:"matureTime"` // 💡 关键修改：成熟的 Unix 时间戳 (秒)
+	Pos        string `json:"pos"`        // 蔬菜在地里的位置特征码 (例如: "AABB")
+}
+
 type VeggieConfigData struct {
 	Veggies  map[string]VeggieInfo `json:"veggies"`
 	Patterns map[string]string     `json:"patterns"`
@@ -133,6 +158,11 @@ type GardenTaskConfig struct {
 	ShareEgg      bool   `json:"shareEgg"`
 }
 
+type ScanTaskConfig struct {
+	InterestedVeggies []string `json:"interestedVeggies"` // 想要搜的菜 ID 列表 (如 ["01CD", "01CC"])
+	SelectedUids      []string `json:"selectedUids"`      // 目标人员 UID 列表 (如 ["024FA5FA", ...])
+}
+
 type RemoteConfig struct {
 	Version string `json:"version"`
 
@@ -148,6 +178,16 @@ type RemoteConfig struct {
 	GardenVeggie struct {
 		PlantVeggie map[string]string `json:"plantVeggie"`
 	} `json:"garden_veggie"`
+}
+
+type TargetUser struct {
+	UID  int64  `json:"uid"`
+	Name string `json:"name"`
+}
+
+type TargetsConfig struct {
+	Version string                  `json:"version"`
+	AllData map[string][]TargetUser `json:"all_data"`
 }
 
 // ------------------- 全局配置与全量映射 -------------------
@@ -287,6 +327,144 @@ func (a *App) initSunnyConfig() {
 				}
 			}
 
+			if conn.Type() == 2 { // 客户端发送的数据包
+				if a.isPKActive && strings.Contains(conn.URL(), "ws/v1/game") {
+					body := conn.Body()
+					if len(body) < 4 {
+						return
+					}
+
+					originalBody := make([]byte, len(body))
+					copy(originalBody, body)
+					bodyHex := strings.ToUpper(hex.EncodeToString(body))
+
+					// 第一步：处理 UID 替换
+					oldUIDHex := fmt.Sprintf("%08X", a.pkSourceUID)
+					newUIDHex := fmt.Sprintf("%08X", a.pkTargetUID)
+
+					uidReplaced := false
+					if strings.Contains(bodyHex, oldUIDHex) {
+						bodyHex = strings.ReplaceAll(bodyHex, oldUIDHex, newUIDHex)
+						uidReplaced = true
+					} else if strings.Contains(bodyHex, newUIDHex) {
+						uidReplaced = true
+					}
+
+					// 第二步：处理区服特征
+					if uidReplaced {
+						replacedSrv := false
+						oldTotalLen := len(body)
+						oldHeader := binary.LittleEndian.Uint32(body[:4])
+
+						// 构建目标区服的模式: 04 + 特征码 + 区服hex + 05CB
+						buildTargetPattern := func(srv uint16) string {
+							switch {
+							case srv < 128:
+								return fmt.Sprintf("04%02X05CB", srv)
+							case srv < 256:
+								return fmt.Sprintf("04CC%02X05CB", srv)
+							default:
+								return fmt.Sprintf("04CD%04X05CB", srv)
+							}
+						}
+
+						// 构建源区服的替换串
+						buildSourcePattern := func(srv uint16) string {
+							switch {
+							case srv < 128:
+								return fmt.Sprintf("04%02X05CB", srv)
+							case srv < 256:
+								return fmt.Sprintf("04CC%02X05CB", srv)
+							default:
+								return fmt.Sprintf("04CD%04X05CB", srv)
+							}
+						}
+
+						// 遍历目标区服范围（961-980）
+						for s := a.pkTargetSrvMin; s <= a.pkTargetSrvMax; s++ {
+							targetPattern := buildTargetPattern(s)
+
+							if strings.Contains(bodyHex, targetPattern) {
+								sourcePattern := buildSourcePattern(a.pkSourceSrvMin) // 901
+
+								// 计算长度变化
+								oldPartLen := len(targetPattern) / 2
+								newPartLen := len(sourcePattern) / 2
+
+								// 统计出现次数
+								count := strings.Count(bodyHex, targetPattern)
+
+								fmt.Printf("【发现】目标模式 %s 出现 %d 次\n", targetPattern, count)
+
+								if oldPartLen != newPartLen {
+									deltaBytes := newPartLen - oldPartLen
+									totalDelta := deltaBytes * count
+									fmt.Printf("【长度变化】%s(%d字节) -> %s(%d字节), 每次变化:%+d字节, 总计:%+d字节\n",
+										targetPattern, oldPartLen, sourcePattern, newPartLen, deltaBytes, totalDelta)
+								}
+
+								// 替换所有匹配的模式
+								bodyHex = strings.ReplaceAll(bodyHex, targetPattern, sourcePattern)
+								replacedSrv = true
+								fmt.Printf("【✅ 拦截成功】目标区服 %d(%s) -> 源区服 %d(%s)\n",
+									s, targetPattern, a.pkSourceSrvMin, sourcePattern)
+								break
+							}
+						}
+
+						if uidReplaced || replacedSrv {
+							newBody, err := hex.DecodeString(bodyHex)
+							if err == nil {
+								newTotalLen := len(newBody)
+
+								if newTotalLen != oldTotalLen {
+									newDataLen := newTotalLen - 4
+									// 1. 更新开头长度头
+									binary.LittleEndian.PutUint32(newBody[:4], uint32(newDataLen))
+
+									// 2. 用字符串方式查找 "DE001F" 并更新前面的4字节长度
+									newBodyHex := strings.ToUpper(hex.EncodeToString(newBody))
+									de001fPos := strings.Index(newBodyHex, "DE001F")
+
+									if de001fPos >= 4 { // 确保前面有2字节(4个十六进制字符)可写
+										// 计算新长度值 = 开头长度头值 - 19
+										newSecondLen := newDataLen - 19
+
+										// 将新长度值转换为4字节大端序十六进制字符串
+										secondLenBytes := make([]byte, 2)
+										binary.BigEndian.PutUint16(secondLenBytes, uint16(newSecondLen))
+										secondLenHex := strings.ToUpper(hex.EncodeToString(secondLenBytes))
+
+										// 替换 DE001F 前面的8个字符
+										pos := de001fPos - 4
+										newBodyHex = newBodyHex[:pos] + secondLenHex + newBodyHex[de001fPos:]
+
+										fmt.Printf("【更新DE001F前长度】原值未知 -> 新值 %d (0x%04X), 位置:%d\n",
+											newSecondLen, newSecondLen, pos/2)
+
+										// 重新解码回字节数组
+										newBody, _ = hex.DecodeString(newBodyHex)
+									} else {
+										fmt.Printf("【警告】未找到 DE001F 位置\n")
+									}
+
+									fmt.Printf("【更新长度头】原总长:%d(头:%d) -> 新总长:%d(头:%d), 变化:%+d字节\n",
+										oldTotalLen, oldHeader, newTotalLen, newDataLen, newTotalLen-oldTotalLen)
+								}
+
+								conn.SetBody(newBody)
+
+								newHeader := binary.LittleEndian.Uint32(newBody[:4])
+								fmt.Printf("【原始包】总长:%d 长度头:%08X(显示) 实际值:%d(数据长)\n",
+									oldTotalLen, oldHeader, oldHeader)
+								fmt.Printf("【修改后】总长:%d 长度头:%08X(显示) 实际值:%d(数据长)\n",
+									newTotalLen, newHeader, newHeader)
+							}
+						}
+					}
+				}
+			}
+
 			// 收到服务器数据
 			if conn.Type() == 3 {
 				bodyBytes := conn.Body()
@@ -310,6 +488,142 @@ func (a *App) initSunnyConfig() {
 					fmt.Println("🚀 已向服务器发送协议解码指令")
 				}
 
+				if a.isPKActive && strings.Contains(conn.URL(), "ws/v1/game") {
+					body := conn.Body()
+					if len(body) < 4 {
+						return
+					}
+
+					originalBody := make([]byte, len(body))
+					copy(originalBody, body)
+					bodyHex := strings.ToUpper(hex.EncodeToString(body))
+
+					// 第一步：处理 UID 替换
+					oldUIDHex := fmt.Sprintf("%08X", a.pkSourceUID)
+					newUIDHex := fmt.Sprintf("%08X", a.pkTargetUID)
+
+					uidReplaced := false
+					if strings.Contains(bodyHex, oldUIDHex) {
+						bodyHex = strings.ReplaceAll(bodyHex, oldUIDHex, newUIDHex)
+						uidReplaced = true
+					} else if strings.Contains(bodyHex, newUIDHex) {
+						uidReplaced = true
+					}
+
+					// 第二步：处理区服特征
+					if uidReplaced {
+						replacedSrv := false
+						oldTotalLen := len(body)
+						oldHeader := binary.LittleEndian.Uint32(body[:4])
+
+						// 构建目标区服的模式: 04 + 特征码 + 区服hex + 05CB
+						buildTargetPattern := func(srv uint16) string {
+							switch {
+							case srv < 128:
+								return fmt.Sprintf("04%02X05CB", srv)
+							case srv < 256:
+								return fmt.Sprintf("04CC%02X05CB", srv)
+							default:
+								return fmt.Sprintf("04CD%04X05CB", srv)
+							}
+						}
+
+						// 构建源区服的替换串
+						buildSourcePattern := func(srv uint16) string {
+							switch {
+							case srv < 128:
+								return fmt.Sprintf("04%02X05CB", srv)
+							case srv < 256:
+								return fmt.Sprintf("04CC%02X05CB", srv)
+							default:
+								return fmt.Sprintf("04CD%04X05CB", srv)
+							}
+						}
+
+						// 遍历目标区服范围（961-980）
+						for s := a.pkTargetSrvMin; s <= a.pkTargetSrvMax; s++ {
+							targetPattern := buildTargetPattern(s)
+
+							if strings.Contains(bodyHex, targetPattern) {
+								sourcePattern := buildSourcePattern(a.pkSourceSrvMin) // 901
+
+								// 计算长度变化
+								oldPartLen := len(targetPattern) / 2
+								newPartLen := len(sourcePattern) / 2
+
+								// 统计出现次数
+								count := strings.Count(bodyHex, targetPattern)
+
+								fmt.Printf("【发现】目标模式 %s 出现 %d 次\n", targetPattern, count)
+
+								if oldPartLen != newPartLen {
+									deltaBytes := newPartLen - oldPartLen
+									totalDelta := deltaBytes * count
+									fmt.Printf("【长度变化】%s(%d字节) -> %s(%d字节), 每次变化:%+d字节, 总计:%+d字节\n",
+										targetPattern, oldPartLen, sourcePattern, newPartLen, deltaBytes, totalDelta)
+								}
+
+								// 替换所有匹配的模式
+								bodyHex = strings.ReplaceAll(bodyHex, targetPattern, sourcePattern)
+								replacedSrv = true
+								fmt.Printf("【✅ 拦截成功】目标区服 %d(%s) -> 源区服 %d(%s)\n",
+									s, targetPattern, a.pkSourceSrvMin, sourcePattern)
+								break
+							}
+						}
+
+						if uidReplaced || replacedSrv {
+							newBody, err := hex.DecodeString(bodyHex)
+							if err == nil {
+								newTotalLen := len(newBody)
+
+								if newTotalLen != oldTotalLen {
+									newDataLen := newTotalLen - 4
+									// 1. 更新开头长度头
+									binary.LittleEndian.PutUint32(newBody[:4], uint32(newDataLen))
+
+									// 2. 用字符串方式查找 "DE001F" 并更新前面的4字节长度
+									newBodyHex := strings.ToUpper(hex.EncodeToString(newBody))
+									de001fPos := strings.Index(newBodyHex, "DE001F")
+
+									if de001fPos >= 4 { // 确保前面有2字节(4个十六进制字符)可写
+										// 计算新长度值 = 开头长度头值 - 19
+										newSecondLen := newDataLen - 19
+
+										// 将新长度值转换为2字节大端序十六进制字符串
+										secondLenBytes := make([]byte, 2)
+										binary.BigEndian.PutUint16(secondLenBytes, uint16(newSecondLen))
+										secondLenHex := strings.ToUpper(hex.EncodeToString(secondLenBytes))
+
+										// 替换 DE001F 前面的4个字符
+										pos := de001fPos - 4
+										newBodyHex = newBodyHex[:pos] + secondLenHex + newBodyHex[de001fPos:]
+
+										fmt.Printf("【更新DE001F前长度】原值未知 -> 新值 %d (0x%04X), 位置:%d\n",
+											newSecondLen, newSecondLen, pos/2)
+
+										// 重新解码回字节数组
+										newBody, _ = hex.DecodeString(newBodyHex)
+									} else {
+										fmt.Printf("【警告】未找到 DE001F 位置\n")
+									}
+
+									fmt.Printf("【更新长度头】原总长:%d(头:%d) -> 新总长:%d(头:%d), 变化:%+d字节\n",
+										oldTotalLen, oldHeader, newTotalLen, newDataLen, newTotalLen-oldTotalLen)
+								}
+
+								conn.SetBody(newBody)
+
+								newHeader := binary.LittleEndian.Uint32(newBody[:4])
+								fmt.Printf("【原始包】总长:%d 长度头:%08X(显示) 实际值:%d(数据长)\n",
+									oldTotalLen, oldHeader, oldHeader)
+								fmt.Printf("【修改后】总长:%d 长度头:%08X(显示) 实际值:%d(数据长)\n",
+									newTotalLen, newHeader, newHeader)
+							}
+						}
+					}
+				}
+
 				// --- 珍宝交易行返回包识别 (50E20000) ---
 				if strings.Contains(bodyHex, "50E20000") && strings.Contains(conn.URL(), "ws/v1/game") {
 					fmt.Println("🔍 检测到珍宝交易行数据流")
@@ -330,6 +644,26 @@ func (a *App) initSunnyConfig() {
 					a.veggieMutex.Lock()
 					a.lastGardenHex = bodyHex // 把这一长条包存下来
 					a.veggieMutex.Unlock()
+				}
+
+				// --- 指定人员营地行返回包识别 (D1E50000) ---
+				if strings.Contains(bodyHex, "D1E50000") && strings.Contains(conn.URL(), "ws/v1/game") {
+					// 2. 关键判断：只有在助手流程开启时才分析
+					if a.isScanningVeggie {
+						fmt.Println("🎯 [扫菜助手] 正在解析目标营地数据...")
+
+						// 🔒 使用专用的 scanMutex
+						a.scanMutex.RLock()
+						selectedVeggies := a.scanConfig.InterestedVeggies
+						a.scanMutex.RUnlock()
+
+						if len(selectedVeggies) > 0 {
+							// 执行解析并推送到前端
+							a.FindTargetVeggies(bodyHex, selectedVeggies)
+						}
+					} else {
+						fmt.Println("玩家手动查看：仅通过数据包，不执行自动化逻辑")
+					}
 				}
 
 				// 匹配到邻居列表数据包
@@ -404,6 +738,60 @@ func (a *App) HexToFloat64(hexStr string) float64 {
 	}
 	bits := binary.BigEndian.Uint64(byteData)
 	return math.Float64frombits(bits)
+}
+
+// 跨服切磋
+func (a *App) SetPKReplacement(tUID, tSrv, sUID, sSrv string) {
+	// 1. 如果传入参数为空，直接关闭功能（防止空跑）
+	if tUID == "" || sUID == "" {
+		a.isPKActive = false
+		return
+	}
+
+	// 2. 解析 UID (10进制字符串转 uint32)
+	tu, _ := strconv.ParseUint(tUID, 10, 32)
+	su, _ := strconv.ParseUint(sUID, 10, 32)
+
+	// 3. 提取解析逻辑：处理 "1-100" 或 "85" 这种格式
+	parseRange := func(srvStr string) (min, max uint16) {
+		if strings.Contains(srvStr, "-") {
+			parts := strings.Split(srvStr, "-")
+			vMin, _ := strconv.ParseUint(parts[0], 10, 16)
+			vMax, _ := strconv.ParseUint(parts[1], 10, 16)
+			// 确保 min 永远小于等于 max
+			if vMin > vMax {
+				return uint16(vMax), uint16(vMin)
+			}
+			return uint16(vMin), uint16(vMax)
+		}
+		val, _ := strconv.ParseUint(srvStr, 10, 16)
+		return uint16(val), uint16(val)
+	}
+
+	tMin, tMax := parseRange(tSrv)
+	sMin, sMax := parseRange(sSrv)
+
+	// 赋值给结构体
+	a.pkTargetUID = uint32(tu)
+	a.pkSourceUID = uint32(su)
+	a.pkTargetSrvMin = tMin
+	a.pkTargetSrvMax = tMax
+	a.pkSourceSrvMin = sMin
+	a.pkSourceSrvMax = sMax
+
+	// 开启开关
+	a.isPKActive = true
+
+	fmt.Printf("【配置生效】UID: %d -> %d, 区服范围: %d-%d -> %d-%d\n",
+		a.pkSourceUID, a.pkTargetUID, a.pkTargetSrvMin, a.pkTargetSrvMax, a.pkSourceSrvMin, a.pkSourceSrvMax)
+}
+
+func (a *App) StopPKMode() error {
+	a.isPKActive = false
+	// 清空内部数据，防止下次开启时逻辑混乱
+	a.pkSourceUID = 0
+	a.pkTargetUID = 0
+	return nil
 }
 
 func (a *App) ParseZhenBao(bodyHex string) []ZhenBaoItem {
@@ -1035,6 +1423,90 @@ func (a *App) findTargetMeats(neighbors []NeighborInfo) {
 
 }
 
+// FindTargetVeggies 核心扫描逻辑
+// hexData: 服务器返回的十六进制原始数据包
+// selectedIds: 用户在前端勾选的蔬菜 ID 数组 (例如 ["01CD", "01CC"])
+func (a *App) FindTargetVeggies(hexData string, selectedIds []string) []Veggie {
+	a.gdMutex.RLock()
+	config := a.gardenData
+	a.gdMutex.RUnlock()
+
+	var results []Veggie
+	// 增加一个防御性打印
+	if len(hexData) < 100 {
+		return results
+	}
+
+	// 1. 定位 UID (特征码 00CE)
+	uidIndex := strings.Index(hexData, "00CE")
+	if uidIndex == -1 || uidIndex+12 > len(hexData) {
+		// fmt.Println("❌ 未在包中找到 UID 引导码 00CE")
+		return results
+	}
+	uidHex := hexData[uidIndex+4 : uidIndex+12]
+
+	// 2. 遍历用户勾选的每一种蔬菜特征码
+	for _, vID := range selectedIds {
+		// 尝试从配置中获取该特征码对应的蔬菜名称等信息
+		info, ok := config.Veggies[vID]
+		if !ok {
+			// 如果找不到配置，为了调试可以打印一下，或者给个默认名
+			// fmt.Printf("⚠️ 警告: 特征码 %s 在配置库中无对应名称\n", vID)
+			continue
+		}
+
+		// 3. 在包中查找所有匹配该特征码的位置
+		searchPos := 0
+		for {
+			// 直接搜索特征码 vID
+			idx := strings.Index(hexData[searchPos:], vID)
+			if idx == -1 {
+				break
+			}
+
+			foundPos := searchPos + idx
+			// 确保找到的位置后面还有足够长度解析时间戳 (至少 56 字节)
+			if foundPos+56 <= len(hexData) {
+
+				// 转换时间戳：截取特征码后 40-56 位
+				rawTimeHex := hexData[foundPos+40 : foundPos+56]
+				matureTimestamp := int64(hexToInt(rawTimeHex)) + int64(info.Offset*60000)
+
+				veggie := Veggie{
+					UID:        uidHex,
+					Name:       info.Name,
+					VeggieType: vID,
+					MatureTime: matureTimestamp,
+				}
+
+				// 核心：抓取坑位信息 (特征码前面的 4 位)
+				if foundPos >= 4 {
+					veggie.Pos = hexData[foundPos-4 : foundPos]
+				}
+
+				results = append(results, veggie)
+
+				// 后台实时打印发现结果
+				fmt.Printf("✅ [命中] 发现 %s! 坑位:%s 成熟时间:%s\n",
+					veggie.Name,
+					veggie.Pos,
+					time.UnixMilli(matureTimestamp).Format("15:04:05"),
+				)
+			}
+			// 🌟 纠错点：步进长度应为特征码 vID 的长度
+			searchPos = foundPos + len(vID)
+		}
+	}
+
+	// 4. 实时推送到前端
+	if len(results) > 0 {
+		fmt.Printf("🚀 准备推送 %d 棵菜到前端...\n", len(results))
+		wailsRuntime.EventsEmit(a.ctx, "on_veggie_discovered", results)
+	}
+
+	return results
+}
+
 func (a *App) LoadRemoteGardenConfig() {
 	// 💡 建议在 URL 后面加个随机数，防止 GitHub CDN 缓存导致下到旧的 JSON
 	url := "https://raw.githubusercontent.com/dear510/cs-config/refs/heads/main/garden_veggie.json?t=" + strconv.FormatInt(time.Now().Unix(), 10)
@@ -1100,141 +1572,242 @@ func (a *App) LoadRemoteCommands() {
 	fmt.Printf("✅ 远程指令集同步成功，版本: %s\n", temp.Version)
 }
 
+// 1. 提供菜园配置给前端
+func (a *App) GetGardenData() VeggieConfigData {
+	a.gdMutex.RLock()
+	defer a.gdMutex.RUnlock()
+	return a.gardenData
+}
+
+// 2. 提供远程大名单给前端 (假设你的配置存在 a.remoteConfig 里)
+func (a *App) GetRemoteConfig() RemoteConfig {
+	a.rcMutex.RLock()
+	defer a.rcMutex.RUnlock()
+	return a.remoteConfig
+}
+
+// GetRemoteTargets 获取云端配置玩家名单
+func (a *App) GetRemoteTargets() (*TargetsConfig, error) {
+	url := "https://raw.githubusercontent.com/dear510/cs-config/refs/heads/main/targets.json"
+
+	client := http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var config TargetsConfig
+	if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
 func (a *App) processGardenActionsSync(hexData string) {
-	// --- 1. 抓取当前号的 ID (UID) ---
-	re2 := regexp.MustCompile(`D3E50000`)
-	match2 := re2.FindStringIndex(hexData)
-	uid := hexData[match2[1]+36 : match2[1]+44]
-	uidDec, _ := strconv.ParseUint(uid, 16, 64)
-	fmt.Println("🆔 识别到当前账号 UID:", uidDec)
-	// --- 2. 获取正则 ---
+	var wg sync.WaitGroup // 声明一个等待组
+	// --- 1. 识别当前账号 UID ---
+	reUID := regexp.MustCompile(`D3E50000`)
+	matchUID := reUID.FindStringIndex(hexData)
+	if matchUID == nil {
+		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+			"message": "⚠️ 未能在数据包中找到 UID",
+			"type":    "error",
+		})
+		return
+	}
+	uidHex := hexData[matchUID[1]+36 : matchUID[1]+44]
+	uidDecimal, _ := strconv.ParseInt(uidHex, 16, 64)
+
+	// --- 2. 获取正则与配置 ---
 	a.gdMutex.RLock()
 	remotePatterns := a.gardenData.Patterns
 	remoteVeggies := a.gardenData.Veggies
 	a.gdMutex.RUnlock()
 
-	// 正则保底：如果远程没给，就用你现在的这一串
-	matchPattern := "00CD[0-9A-F]{4}01CE00AAE[0-9A-F]{27}06CF[0-9A-F]{16}"
+	matchPattern := `00CD[0-9A-F]{4}(01CE00AAE[0-9A-F]{27}|01CD01F6[0-9A-F]{24})06CF[0-9A-F]{16}`
 	if p, ok := remotePatterns["veggie_match"]; ok {
 		matchPattern = p
 	}
-	re1 := regexp.MustCompile(matchPattern)
-	match1 := re1.FindAllStringIndex(hexData, -1)
+	reVeg := regexp.MustCompile(matchPattern)
+	matches := reVeg.FindAllStringIndex(hexData, -1)
 
-	// --- 2. 处理菜品识别 ---
+	wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+		"message": fmt.Sprintf("🔍 账号 %d 扫描完成，发现 %d 块土地", uidDecimal, len(matches)),
+		"type":    "default",
+	})
+
 	currentTime := time.Now().Unix()
-
-	// 💡 准备一个临时数组记录本次检测到的时间，默认设为 0
 	tempTimestamps := [4]int64{0, 0, 0, 0}
 
-	for i := 0; i < len(match1); i++ {
-		// --- 核心：确定当前这颗菜的数据边界 (endIdx) ---
-		startIdx := match1[i][0]
+	// --- 3. 循环解析每块土地 ---
+	for i, m := range matches {
+		if i >= 4 {
+			break
+		}
+
+		startIdx := m[0]
 		var endIdx int
-		if i+1 < len(match1) {
-			endIdx = match1[i+1][0] // 下一颗菜的开头
+		if i+1 < len(matches) {
+			endIdx = matches[i+1][0]
 		} else {
-			// 如果是最后一颗菜，往后截取一段合理的长度（比如 500 字节）或到 hexData 末尾
 			endIdx = startIdx + 500
 			if endIdx > len(hexData) {
 				endIdx = len(hexData)
 			}
 		}
-		// 提取这颗菜的独立数据块
-		currentVeggieBlock := hexData[startIdx:endIdx]
+		block := hexData[startIdx:endIdx]
+		pos := block[4:8]
 
-		veggieType := currentVeggieBlock[8:20]
-		pos := currentVeggieBlock[4:8]
-
-		var info VeggieInfo
-		found := false
-
-		// 先从远程配置找
-		if remoteInfo, ok := remoteVeggies[veggieType]; ok {
-			info = remoteInfo
-			found = true
-			fmt.Println("已成功连接云端数据库")
+		isGoldenTree := strings.Contains(block[8:24], "01CD01F6")
+		var vType string
+		if isGoldenTree {
+			vType = "01CD01F6"
 		} else {
-			// 本地保底：你可以把之前的那些品种写在这里
-			localLookup := map[string]VeggieInfo{
-				"01CE00AAEA52": {"变异南瓜", 10 * 60},
-				"01CE00AAEA51": {"变异玉米", 8 * 60},
-				"01CE00AAEA50": {"变异胡萝卜", 6 * 60},
-				"01CE00AAE66A": {"南瓜", 10 * 60},
-				"01CE00AAE668": {"胡萝卜", 6 * 60},
-				"01CE00AAE665": {"萝卜", 1 * 60},
-				"01CE00AAE666": {"小麦", 90},
-				"01CE00AAE669": {"玉米", 8 * 60},
-				"01CE00AAE667": {"白菜", 3 * 60},
-			}
-			if li, ok := localLookup[veggieType]; ok {
-				info = li
-				found = true
-			}
+			vType = block[8:20]
 		}
 
-		if found {
-			// 1. 处理成熟逻辑 (第一个 06CF)
-			matureUnix, _ := strconv.ParseInt(currentVeggieBlock[48:64], 16, 64)
-
-			// 计算成熟秒数：(种植时刻时间戳 / 1000) + (分钟 * 60)
-			MatureTime := (matureUnix / 1000) + int64(info.Offset*60)
-			tempTimestamps[i] = MatureTime
+		// 匹配品种
+		info, ok := remoteVeggies[vType]
+		if !ok {
 			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-				"message": fmt.Sprintf("🌱 检测到: %s, 预计成熟时间: %s", info.Name, time.Unix(MatureTime, 0).Format("15:04:05")),
-				"type":    "info",
+				"message": fmt.Sprintf("❌ 未知特征码 [%s]，请更新字典", vType),
+				"type":    "warning",
 			})
+			continue
+		}
 
-			// 如果到点了
-			if currentTime >= MatureTime {
+		// 提取成熟时间
+		reTime := regexp.MustCompile(`06CF([0-9A-F]{16})`)
+		tMatch := reTime.FindStringSubmatch(block)
+		if len(tMatch) < 2 {
+			continue
+		}
+
+		rawUnix, _ := strconv.ParseInt(tMatch[1], 16, 64)
+		matureTime := (rawUnix / 1000) + int64(info.Offset*60)
+		tempTimestamps[i] = matureTime
+
+		// --- 4. 成熟逻辑判定 ---
+		if currentTime >= matureTime {
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": fmt.Sprintf("🚀 %s 已成熟，执行收割...", info.Name, pos),
+				"type":    "default",
+			})
+			if isGoldenTree {
 				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": fmt.Sprintf("🚨 %s 已成熟！执行自动收菜...", info.Name),
-					"type":    "info",
+					"message": fmt.Sprintf("🌳 %s 已成熟，准备开始 50 次灌注...", info.Name, pos),
+					"type":    "default",
 				})
-				HarvestCmd := fmt.Sprintf("140000009917000000287A7F82410092CD%sCE%s", pos, uid)
-				// 发包...
-				keyCmd, _ := hex.DecodeString(HarvestCmd)
-				a.activeConn.SendToServer(2, keyCmd)
-				time.Sleep(time.Duration(600+rand.Intn(201)) * time.Millisecond)
+
+				wg.Add(1) // 告诉程序：有一个异步任务要等
+				go func() {
+					defer wg.Done() // 任务结束后，计数减 1
+					a.handleGoldenTreeHarvest(uidHex, pos, info.Name)
+				}()
+			} else {
+				harvestCmd := fmt.Sprintf("14000000991700000012345F82410092CD%sCE%s", pos, uidHex)
+				cmdBytes, _ := hex.DecodeString(harvestCmd)
+				if a.activeConn != nil {
+					a.activeConn.SendToServer(2, cmdBytes)
+				}
+				time.Sleep(time.Duration(600+rand.Intn(200)) * time.Millisecond)
 			}
+		} else {
+			timeLeft := matureTime - currentTime
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": fmt.Sprintf("⏳ %s 预计成熟时间为%s (%s 后成熟)", info.Name, time.Unix(matureTime, 0).Format("15:04:05"), formatDuration(timeLeft)),
+				"type":    "default",
+			})
+		}
 
-			// --- 2. 核心新增：在当前块中寻找异常状态 (02CF000001) ---
-			// 这里的正则匹配 02CF000001 后面cf后面紧跟的 16 位时间戳
+		// --- 5. 灾害处理 ---
+		if !isGoldenTree {
 			reIncident := regexp.MustCompile(`02CF(000001[0-9A-F]{10})`)
-			incidentMatches := reIncident.FindAllStringSubmatch(currentVeggieBlock, -1)
-
-			for _, imatch := range incidentMatches {
-				incidentUnix, _ := strconv.ParseInt(imatch[1], 16, 64)
-				startTime := incidentUnix / 1000
-
-				if startTime > 0 {
-					if currentTime >= startTime && (currentTime-startTime) < 3600 {
-						wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-							"message": fmt.Sprintf("🐛 检测到虫灾/旱灾！处理中..."),
-							"type":    "info",
-						})
-						// 发送除虫/浇水指令 (请确认该操作的前缀)
-						HarvestCmd := fmt.Sprintf("150000009817000000287A7F82410093CD%sCE%s01", pos, uid)
-						// 发包...
-						keyCmd, _ := hex.DecodeString(HarvestCmd)
-						a.activeConn.SendToServer(2, keyCmd)
-						time.Sleep(time.Duration(5200+rand.Intn(201)) * time.Millisecond)
-					} else if currentTime < startTime {
-						wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-							"message": fmt.Sprintf("⏳ 预警：预计 %s 发生灾害", time.Unix(startTime, 0).Format("15:04:05")),
-							"type":    "default",
-						})
+			if incMatch := reIncident.FindStringSubmatch(block); len(incMatch) > 1 {
+				startTime, _ := strconv.ParseInt(incMatch[1], 16, 64)
+				startTime = startTime / 1000
+				if currentTime >= startTime && (currentTime-startTime) < 3600 {
+					wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+						"message": fmt.Sprintf("🐛 %s 发现灾害，自动处理中...", info.Name, pos),
+						"type":    "warning",
+					})
+					fixCmd := fmt.Sprintf("15000000981700000012345F82410093CD%sCE%s01", pos, uidHex)
+					cmdBytes, _ := hex.DecodeString(fixCmd)
+					if a.activeConn != nil {
+						a.activeConn.SendToServer(2, cmdBytes)
 					}
+					time.Sleep(time.Duration(5200+rand.Intn(300)) * time.Millisecond)
 				}
 			}
 		}
 	}
 
-	// 💡 【核心新增】循环结束后，将结果同步到 App 全局变量
+	// 核心更新：同步给前端倒计时组件
 	a.vtMutex.Lock()
 	a.veggieTimestamps = tempTimestamps
 	a.vtMutex.Unlock()
-	fmt.Println("📊 菜园时间戳缓存已更新:", a.veggieTimestamps)
+	wg.Wait()
+}
+
+// 辅助函数：处理黄金树 50 次灌注
+func (a *App) handleGoldenTreeHarvest(uid, pos, name string) {
+	a.vtMutex.Lock()
+	if a.harvestingPos == nil {
+		a.harvestingPos = make(map[string]bool)
+	}
+	if a.harvestingPos[pos] {
+		a.vtMutex.Unlock()
+		return
+	}
+	a.harvestingPos[pos] = true
+	a.vtMutex.Unlock()
+
+	defer func() {
+		a.vtMutex.Lock()
+		delete(a.harvestingPos, pos)
+		a.vtMutex.Unlock()
+	}()
+
+	// 阶段 1: 发送 50 次指令
+	for i := 1; i <= 50; i++ {
+		part1 := fmt.Sprintf("15000000951700000076543282410093CE%sCD%s01", uid, pos)
+		cmd, _ := hex.DecodeString(part1)
+		if a.activeConn != nil {
+			a.activeConn.SendToServer(2, cmd)
+		}
+		time.Sleep(time.Duration(550+rand.Intn(150)) * time.Millisecond)
+	}
+
+	// 阶段 2: 最终收尾
+	part2 := fmt.Sprintf("0F000000971700000087654F82410091CD%s", pos)
+	finalCmd, _ := hex.DecodeString(part2)
+	if a.activeConn != nil {
+		a.activeConn.SendToServer(2, finalCmd)
+	}
+
+	wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+		"message": fmt.Sprintf("✅ %s 收割完成！", name),
+		"type":    "success",
+	})
+}
+
+// 预告还有多久成熟
+func formatDuration(seconds int64) string {
+	if seconds <= 0 {
+		return "即将成熟"
+	}
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	s := seconds % 60
+
+	if h > 0 {
+		return fmt.Sprintf("%d小时%d分%d秒", h, m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%d分%d秒", m, s)
+	}
+	return fmt.Sprintf("%d秒", s)
 }
 
 // ToggleGardenLoop 开启或关闭挂机
@@ -2198,6 +2771,94 @@ func (a *App) runVeggieTask(config map[string]interface{}) {
 			a.activeConn.SendToServer(2, p)
 			time.Sleep(1300 * time.Millisecond)
 		}
+	}
+
+	// --- 第三阶段：扫菜巡逻逻辑 ---
+	if active, ok := config["scanVeggie"].(bool); ok && active {
+		// 1. 开启扫菜解析开关
+		a.isScanningVeggie = true
+		// 2. 解析 UID 列表 (处理 JSON 数字转 float64 的坑)
+		var targetUids []int64 // 直接存 int64 更稳妥
+		if uids, ok := config["selectedUids"].([]interface{}); ok {
+			for _, u := range uids {
+				// 🌟 关键：JSON 数字在 map[string]interface{} 中默认是 float64
+				if val, ok := u.(float64); ok {
+					targetUids = append(targetUids, int64(val))
+				} else if valStr, ok := u.(string); ok {
+					// 兼容字符串格式
+					id, _ := strconv.ParseInt(valStr, 10, 64)
+					if id > 0 {
+						targetUids = append(targetUids, id)
+					}
+				}
+			}
+		}
+
+		// 2. 🌟 关键修复：解析感兴趣的蔬菜 ID 列表 (用于解析包)
+		var interestedVeggies []string
+		if ivs, ok := config["interestedVeggies"].([]interface{}); ok {
+			for _, v := range ivs {
+				// 蔬菜 ID 通常是字符串 (如 "01CD")，但也可能是数字
+				if valStr, ok := v.(string); ok {
+					interestedVeggies = append(interestedVeggies, valStr)
+				} else if valFloat, ok := v.(float64); ok {
+					interestedVeggies = append(interestedVeggies, fmt.Sprintf("%04X", int64(valFloat)))
+				}
+			}
+		}
+		// 3. 将解析出来的名单存入内存，供拦截器使用
+		a.scanMutex.Lock()
+		a.scanConfig.SelectedUids = []string{} // 清空旧的
+		for _, id := range targetUids {
+			a.scanConfig.SelectedUids = append(a.scanConfig.SelectedUids, fmt.Sprint(id))
+		}
+		a.scanConfig.InterestedVeggies = interestedVeggies // 存入正确断言后的名单
+		a.scanMutex.Unlock()
+
+		fmt.Println("📍 待扫描 UID 列表 (十进制):", targetUids)
+		fmt.Printf("🥬 感兴趣的蔬菜 ID: %v (数量: %d)\n", interestedVeggies, len(interestedVeggies))
+
+		if len(targetUids) > 0 {
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": fmt.Sprintf("🔍 开始扫菜巡逻: 共有 %d 个目标", len(targetUids)),
+				"type":    "default",
+			})
+
+			// 3. 依次发送访问指令
+			for i, uidInt := range targetUids {
+				select {
+				case <-a.stopGardenLoop:
+					fmt.Println("🛑 扫菜巡逻被手动中止")
+					a.isScanningVeggie = false
+					return
+				default:
+					// 🌟 修正：现在 uidInt 已经是正确的 int64 了
+					// %08X 会将其转为 8 位大写的十六进制 (如 024FA5FA)
+					uidHex := fmt.Sprintf("%08X", uidInt)
+					packetHex := "110000002F1A00000009253F82410091CE" + uidHex
+
+					wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+						"message": fmt.Sprintf("📡 正在扫描(%d/%d): %d 的菜园", i+1, len(targetUids), uidInt),
+						"type":    "default",
+					})
+
+					p, _ := hex.DecodeString(packetHex)
+					a.activeConn.SendToServer(2, p)
+
+					// 每条包间隔，你设置的 0.5s~0.9s
+					time.Sleep(1500 * time.Millisecond)
+				}
+			}
+
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": "🏁 扫菜巡逻已全部完成",
+				"type":    "success",
+			})
+		}
+
+		// 扫描结束，多等几秒让最后一个包返回，再关闭解析开关
+		time.Sleep(5 * time.Second)
+		a.isScanningVeggie = false
 	}
 }
 
