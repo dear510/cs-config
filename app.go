@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"math"
 	"math/rand"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -31,7 +35,7 @@ type App struct {
 	packetCount      int
 	isConnected      bool
 	activeConn       SunnyNet.ConnWebSocket
-	UserLevel        int // 0:未授权, 1:普通, 2:高级
+	UserLevel        int // 0:未授权, 1:珍宝/切磋, 3:日常功能, 5:工会对决奖励
 
 	// --- 珍宝模块 ---
 	activeRules        []PurchaseRule
@@ -1310,91 +1314,89 @@ func (a *App) GetCategoryNames() []string {
 	return categories
 }
 
-// 解析邻居列表
+// parseNeighborList 解析邻居列表（在 Sunny 回调中调用）
 func (a *App) parseNeighborList(hexData string) []NeighborInfo {
 	var neighbors []NeighborInfo
-	pos := 0
 
-	for pos < len(hexData) {
+	// 快速检查是否是有效的邻居列表包
+	if !strings.Contains(hexData, "D2E5000000") {
+		return neighbors
+	}
+
+	pos := 0
+	maxPos := len(hexData) - 100 // 避免越界
+
+	for pos < maxPos {
 		// 查找UID开始的标记 (00CE)
 		uidStart := strings.Index(hexData[pos:], "00CE")
 		if uidStart == -1 {
 			break
 		}
 		uidStart += pos
+
+		// 确保有足够的长度读取UID
+		if uidStart+12 > len(hexData) {
+			break
+		}
+
 		neighbor := parseSingleNeighbor(hexData, uidStart)
 		if neighbor.UID != "" {
 			neighbors = append(neighbors, neighbor)
 		}
 
 		// 移动到下一个可能的位置
-		pos = uidStart + 4
+		pos = uidStart + 12
 	}
+
 	return neighbors
 }
 
-// 解析单个邻居信息
+// parseSingleNeighbor 解析单个邻居信息
 func parseSingleNeighbor(hexData string, startPos int) NeighborInfo {
 	var neighbor NeighborInfo
-	pos := startPos
 
-	// 1. 安全读取 UID
-	if pos+12 <= len(hexData) && hexData[pos:pos+4] == "00CE" {
-		neighbor.UID = hexData[pos+4 : pos+12]
-		pos += 12
-	} else {
-		return neighbor // 如果连UID头都对不上，直接返回空
+	// 防御性检查
+	if startPos < 0 || startPos+12 > len(hexData) {
+		return neighbor
 	}
 
-	// 2. 查找肉标记 (06xx07xx) - 增加安全保护
-	pattern := `06(01|02|03)07(01|02|03)`
-	re := regexp.MustCompile(pattern)
-	match := re.FindStringIndex(hexData[pos:])
-
-	// 🚨 修复核心：必须判断是否找到了匹配
-	if match == nil {
-		return neighbor // 没找到肉标记，提前结束，防止 match[0] 崩溃
-	}
-
-	// 记录肉标记在全局 hexData 中的绝对位置
-	absoluteMatchPos := pos + match[0]
-
-	// 检查长度是否足以读取 MeatType 和 MeatStatus (需要绝对位置往后至少 8 位)
-	if absoluteMatchPos+8 <= len(hexData) {
-		neighbor.MeatType = hexData[absoluteMatchPos+2 : absoluteMatchPos+4]
-		neighbor.MeatStatus = hexData[absoluteMatchPos+6 : absoluteMatchPos+8]
-
-		// 检查 pos-16 是否越界 (用于获取 pvp)
-		if absoluteMatchPos >= 16 {
-			neighbor.pvp = hexToInt(hexData[absoluteMatchPos-16 : absoluteMatchPos-14])
-		}
-
-		// 更新指针到肉标记之后
-		pos = absoluteMatchPos + 8
+	// 1. 读取 UID
+	if hexData[startPos:startPos+4] == "00CE" {
+		neighbor.UID = hexData[startPos+4 : startPos+12]
 	} else {
 		return neighbor
 	}
 
-	// 3. 查找蛋标记 (0Cxx0Dxx)
-	pattern = `0C[0-9A-F]{2}0D[0-9A-F]{2}`
-	re1 := regexp.MustCompile(pattern)
-	match1 := re1.FindStringIndex(hexData[pos:])
+	// 2. 查找肉标记 (06xx07xx)
+	searchStart := startPos + 12
+	if searchStart+20 > len(hexData) {
+		return neighbor
+	}
 
-	if match1 != nil {
-		eggPos := pos + match1[0]
-		// 确保蛋标记后的数据够读
-		if eggPos+4 <= len(hexData) {
-			neighbor.HasEgg = hexData[eggPos+2 : eggPos+4]
-			pos = eggPos + 8 // 更新指针
+	pattern := `06(01|02|03)07(01|02|03)`
+	re := regexp.MustCompile(pattern)
+	searchArea := hexData[searchStart:min(searchStart+100, len(hexData))]
+	match := re.FindStringIndex(searchArea)
+
+	if match != nil {
+		absoluteMatchPos := searchStart + match[0]
+
+		// 确保有足够的数据读取肉类型和状态
+		if absoluteMatchPos+8 <= len(hexData) {
+			neighbor.MeatType = hexData[absoluteMatchPos+2 : absoluteMatchPos+4]
+			neighbor.MeatStatus = hexData[absoluteMatchPos+6 : absoluteMatchPos+8]
+
+			// 读取 pvp 值（如果可用）
+			if absoluteMatchPos >= 16 {
+				pvpHex := hexData[absoluteMatchPos-16 : absoluteMatchPos-14]
+				neighbor.pvp = hexToInt(pvpHex)
+			}
 		}
-	} else {
-		neighbor.HasEgg = ""
 	}
 
 	return neighbor
 }
 
-// 查找目标肉类型
 func (a *App) findTargetMeats(neighbors []NeighborInfo) {
 	var smallMeatFound, mediumMeatFound, largeMeatFound bool
 
@@ -1691,7 +1693,7 @@ func (a *App) processGardenActionsSync(hexData string) {
 		// --- 4. 成熟逻辑判定 ---
 		if currentTime >= matureTime {
 			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-				"message": fmt.Sprintf("🚀 %s 已成熟，执行收割...", info.Name, pos),
+				"message": fmt.Sprintf("🚀 %s 已成熟，执行收割...", info.Name),
 				"type":    "default",
 			})
 			if isGoldenTree {
@@ -1729,7 +1731,7 @@ func (a *App) processGardenActionsSync(hexData string) {
 				startTime = startTime / 1000
 				if currentTime >= startTime && (currentTime-startTime) < 3600 {
 					wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-						"message": fmt.Sprintf("🐛 %s 发现灾害，自动处理中...", info.Name, pos),
+						"message": fmt.Sprintf("🐛 %s 发现灾害，自动处理中...", info.Name),
 						"type":    "warning",
 					})
 					fixCmd := fmt.Sprintf("15000000981700000012345F82410093CD%sCE%s01", pos, uidHex)
@@ -1812,18 +1814,30 @@ func formatDuration(seconds int64) string {
 
 // ToggleGardenLoop 开启或关闭挂机
 func (a *App) ToggleGardenLoop(enable bool, config map[string]interface{}) {
-	// 1. 立即同步配置仓库，解决延迟问题
-	// 这里的 updateGardenConfigFromMap 必须确保能正确填充 a.gardenTask
+	// 1. 立即同步配置仓库
 	a.updateGardenConfigFromMap(config)
 
 	if enable {
 		a.gdMutex.Lock()
 		if a.isGardenLoopRunning {
 			a.gdMutex.Unlock()
-			// 如果已在运行，仅同步新配置并通知前端
 			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-				"message": "🔄 挂机配置已实时同步更新 (当前轮次结束后生效)",
+				"message": "🔄 挂机配置已实时同步更新",
 				"type":    "info",
+			})
+			return
+		}
+
+		// 检查是否有任何子任务被选中
+		hasAnyTask := a.gardenTask.CollectMeat || a.gardenTask.EatMeat ||
+			a.gardenTask.CollectVeggie || a.gardenTask.PlantVeggie ||
+			a.gardenTask.ShareEgg
+
+		if !hasAnyTask {
+			a.gdMutex.Unlock()
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": "⚠️ 请至少勾选一个菜园维护任务",
+				"type":    "warning",
 			})
 			return
 		}
@@ -1841,36 +1855,70 @@ func (a *App) ToggleGardenLoop(enable bool, config map[string]interface{}) {
 			})
 
 			for {
-				// 2. 每一轮循环开始，加读锁获取配置快照
+				// 检查是否应该停止
+				select {
+				case <-a.stopGardenLoop:
+					return
+				default:
+				}
+
+				// 获取当前配置快照
 				a.gdMutex.RLock()
 				taskStruct := a.gardenTask
 				a.gdMutex.RUnlock()
 
-				// 3. 将 Struct 转回 Map 以兼容你现有的三个任务函数
-				taskMap := make(map[string]interface{})
-				j, _ := json.Marshal(taskStruct)
-				json.Unmarshal(j, &taskMap)
+				// 将结构体转为map
+				configMap := mapToInterface(taskStruct)
 
-				// --- 🟢 通知前端：新一轮巡查开始 ---
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "🔄 开始新一轮自动巡查...",
-					"type":    "default",
-					"time":    time.Now().Format("15:04:05"),
-				})
+				// 🌟 关键修复：只调用被勾选的任务
 
-				// 4. 执行原有的任务函数
-				a.runMeatTask(taskMap)
-				a.runVeggieTask(taskMap)
-				a.runEggTask(taskMap)
+				// 检查肉类任务（只有被勾选时才调用）
+				if taskStruct.CollectMeat || taskStruct.EatMeat {
+					select {
+					case <-a.stopGardenLoop:
+						return
+					default:
+						a.runMeatTask(configMap)
+					}
+				}
 
-				// --- ⚪ 通知前端：本轮巡查结束 ---
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 本轮巡查任务已全部完成，进入休眠...",
-					"type":    "success",
-					"time":    time.Now().Format("15:04:05"),
-				})
+				// 检查菜类任务（只有被勾选时才调用）
+				if taskStruct.CollectVeggie || taskStruct.PlantVeggie {
+					select {
+					case <-a.stopGardenLoop:
+						return
+					default:
+						a.runVeggieTask(configMap)
+					}
+				}
 
-				// 5. 等待 5 分钟或停止信号
+				// 检查蛋类任务（只有被勾选时才调用）
+				if taskStruct.ShareEgg {
+					select {
+					case <-a.stopGardenLoop:
+						return
+					default:
+						a.runEggTask(configMap)
+					}
+				}
+
+				// 再次检查是否有任务需要执行（防止用户中途取消所有勾选）
+				a.gdMutex.RLock()
+				stillHasTask := a.gardenTask.CollectMeat || a.gardenTask.EatMeat ||
+					a.gardenTask.CollectVeggie || a.gardenTask.PlantVeggie ||
+					a.gardenTask.ShareEgg
+				a.gdMutex.RUnlock()
+
+				if !stillHasTask {
+					wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+						"message": "⚠️ 没有选中的任务，自动挂机停止",
+						"type":    "warning",
+					})
+					a.ToggleGardenLoop(false, nil)
+					return
+				}
+
+				// 等待5分钟或停止信号
 				select {
 				case <-time.After(305 * time.Second):
 					continue
@@ -1880,11 +1928,15 @@ func (a *App) ToggleGardenLoop(enable bool, config map[string]interface{}) {
 			}
 		}()
 	} else {
-		// 6. 处理关闭逻辑
+		// 处理关闭逻辑
 		a.gdMutex.Lock()
 		if a.isGardenLoopRunning {
 			close(a.stopGardenLoop)
 			a.isGardenLoopRunning = false
+			// 重置所有任务标志（但保留VeggieType默认值）
+			a.gardenTask = GardenTaskConfig{
+				VeggieType: "baicai",
+			}
 			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
 				"message": "🛑 菜园自动挂机已停止",
 				"type":    "warning",
@@ -1892,6 +1944,22 @@ func (a *App) ToggleGardenLoop(enable bool, config map[string]interface{}) {
 		}
 		a.gdMutex.Unlock()
 	}
+}
+
+// mapToInterface 将结构体转为 map[string]interface{}
+func mapToInterface(task GardenTaskConfig) map[string]interface{} {
+	result := make(map[string]interface{})
+	result["collectMeat"] = task.CollectMeat
+	result["eatMeat"] = task.EatMeat
+	result["eatNeighbors"] = task.EatNeighbors
+	result["eatGuilds"] = task.EatGuilds
+	result["eatRankings"] = task.EatRankings
+	result["collectVeggie"] = task.CollectVeggie
+	result["plantVeggie"] = task.PlantVeggie
+	result["buySeeds"] = task.BuySeeds
+	result["veggieType"] = task.VeggieType
+	result["shareEgg"] = task.ShareEgg
+	return result
 }
 
 // updateGardenConfigFromMap 负责将前端传来的 Map 安全同步到 gardenTask 结构体
@@ -1925,7 +1993,6 @@ func (a *App) executeGardenMaintenance(config map[string]interface{}) {
 }
 
 // ExecuteDailyTasks 执行日常任务流水线
-// 该方法会被前端 Vue 通过 window.go.main.App.ExecuteDailyTasks 调用
 func (a *App) ExecuteDailyTasks(tasks []TaskParam) {
 	if a.isTaskRunning {
 		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
@@ -1935,115 +2002,168 @@ func (a *App) ExecuteDailyTasks(tasks []TaskParam) {
 		return
 	}
 
+	// 保存自动挂机状态
+	a.gdMutex.RLock()
+	wasGardenRunning := a.isGardenLoopRunning
+	gardenConfig := a.gardenTask
+	a.gdMutex.RUnlock()
+
+	// 如果自动挂机正在运行，先暂停
+	if wasGardenRunning {
+		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+			"message": "⏸️ 检测到自动挂机运行中，暂时停止...",
+			"type":    "info",
+		})
+
+		// 调用 ToggleGardenLoop 停止自动挂机
+		a.ToggleGardenLoop(false, nil)
+
+		// 等待确保完全停止
+		time.Sleep(2 * time.Second)
+	}
+
 	// 开启唯一的一个异步协程，负责跑完整个任务列表
 	go func() {
 		a.isTaskRunning = true
-		defer func() { a.isTaskRunning = false }()
+		defer func() {
+			a.isTaskRunning = false
 
-		// 这里的循环会按照 taskIDs 的顺序一个一个跑
-		for _, id := range tasks {
-			switch id.ID {
-			case "dungeon_all":
-				a.runDungeonTask(id.Config)
-				// 每个子任务结束后，可以在这里发一个阶段性完成的消息
+			// 恢复自动挂机（如果之前是运行状态）
+			if wasGardenRunning {
 				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 副本任务已完成",
+					"message": "🔄 正在恢复自动挂机...",
 					"type":    "info",
 				})
 
-			case "guild_sign":
-				// 紧跟其后执行工会签到
-				a.runGuildTask(id.Config)
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 工会任务已完成",
-					"type":    "info",
-				})
+				// 等待一小段时间再恢复，避免冲突
+				time.Sleep(3 * time.Second)
 
-			case "red_diamond":
-				// 召唤类任务
-				a.runRedDiamondTask(id.Config)
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 召唤任务已完成",
-					"type":    "info",
-				})
+				// 将gardenConfig转回map
+				configMap := make(map[string]interface{})
+				j, _ := json.Marshal(gardenConfig)
+				json.Unmarshal(j, &configMap)
 
-			case "reward_tasks":
-				// 召唤类任务
-				a.runRewardTask(id.Config)
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 每日任务已完成",
-					"type":    "info",
-				})
-
-			case "garden_meat":
-				// 菜园肉类任务
-				a.runMeatTask(id.Config)
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 菜园肉类操作已完成",
-					"type":    "info",
-				})
-
-			case "garden_veggie":
-				// 菜园菜类任务
-				a.runVeggieTask(id.Config)
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 菜园菜类操作已完成",
-					"type":    "info",
-				})
-
-			case "garden_egg":
-				// 菜园肉类任务
-				a.runEggTask(id.Config)
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 菜园蛋类操作已完成",
-					"type":    "info",
-				})
-
-			case "weekly_reward":
-				// 周奖励
-				a.runWeeklyRewardTask(id.Config)
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 周期活动奖励已领取/兑换",
-					"type":    "info",
-				})
-
-			case "guild_pk":
-				// 工会对决任务
-				a.runGuildPKTask(id.Config)
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 工会对决任务已完成",
-					"type":    "info",
-				})
-
-			case "race":
-				// 竞技类
-				a.runRaceTask(id.Config)
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 竞技类任务已完成",
-					"type":    "info",
-				})
-
-			case "gamble":
-				// 竞猜类
-				a.runGambleTask(id.Config)
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": "✅ 竞猜类任务已完成",
-					"type":    "info",
-				})
-
+				// 重新启动自动挂机
+				a.ToggleGardenLoop(true, configMap)
 			}
 
-			// 任务之间建议给 2 秒左右的喘息时间，模拟真人切换界面的动作
-			time.Sleep(2 * time.Second)
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message":  "✨ 所有任务执行完毕",
+				"type":     "info",
+				"finished": true,
+			})
+		}()
+
+		// 检查是否有任何任务被选中
+		if len(tasks) == 0 {
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message":  "⚠️ 没有选中任何任务",
+				"type":     "error",
+				"finished": true,
+			})
+			return
 		}
 
-		// ⚠️ 只有这里才发 finished: true，按钮才会变回来
+		// 发送开始执行的消息
 		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-			"message":  "✨ 所有选中任务已全部执行完毕",
-			"type":     "info",
-			"finished": true,
+			"message": fmt.Sprintf("▶️ 开始执行 %d 个任务", len(tasks)),
+			"type":    "info",
+		})
+
+		// 遍历执行每个任务
+		for index, task := range tasks {
+			// 检查连接是否正常
+			if a.activeConn == nil {
+				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+					"message":  "❌ 游戏连接已断开，任务中止",
+					"type":     "error",
+					"finished": true,
+				})
+				return
+			}
+
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": fmt.Sprintf("📋 [%d/%d] 开始执行: %s", index+1, len(tasks), a.getTaskName(task.ID)),
+				"type":    "info",
+			})
+
+			// 根据任务ID执行对应的任务 - 包括菜园维护任务
+			switch task.ID {
+			case "dungeon_all":
+				a.runDungeonTask(task.Config)
+
+			case "guild_sign":
+				a.runGuildTask(task.Config)
+
+			case "red_diamond":
+				a.runRedDiamondTask(task.Config)
+
+			case "reward_tasks":
+				a.runRewardTask(task.Config)
+
+			case "garden_meat":
+				a.runMeatTask(task.Config)
+
+			case "garden_veggie":
+				a.runVeggieTask(task.Config)
+
+			case "garden_egg":
+				a.runEggTask(task.Config)
+
+			case "weekly_reward":
+				a.runWeeklyRewardTask(task.Config)
+
+			case "guild_pk":
+				a.runGuildPKTask(task.Config)
+
+			case "race":
+				a.runRaceTask(task.Config)
+
+			case "gamble":
+				a.runGambleTask(task.Config)
+
+			default:
+				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+					"message": fmt.Sprintf("⚠️ 未知任务类型: %s", task.ID),
+					"type":    "warning",
+				})
+			}
+
+			// 每个任务执行完后发送完成消息
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": fmt.Sprintf("✅ [%d/%d] %s 执行完成", index+1, len(tasks), a.getTaskName(task.ID)),
+				"type":    "success",
+			})
+		}
+
+		// 所有任务执行完毕
+		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+			"message":  "🎉 所有任务已执行完毕",
+			"type":     "success",
+			"finished": false,
 		})
 	}()
+}
+
+// getTaskName 根据任务ID返回任务名称
+func (a *App) getTaskName(taskID string) string {
+	taskNames := map[string]string{
+		"dungeon_all":   "副本任务",
+		"guild_sign":    "工会任务",
+		"red_diamond":   "召唤任务",
+		"reward_tasks":  "每日任务",
+		"garden_meat":   "肉类任务",
+		"garden_veggie": "菜类任务",
+		"garden_egg":    "蛋类任务",
+		"weekly_reward": "周期活动",
+		"guild_pk":      "工会对决",
+		"race":          "竞技类任务",
+		"gamble":        "竞猜类任务",
+	}
+	if name, ok := taskNames[taskID]; ok {
+		return name
+	}
+	return taskID
 }
 
 func (a *App) runDungeonTask(config map[string]interface{}) {
@@ -2182,7 +2302,7 @@ func (a *App) buildDungeonPacket(dType string, level int) string {
 	} else {
 		low := level & 0xFF
 		high := (level >> 8) & 0xFF
-		levelHex = fmt.Sprintf("CD%02X%02X", low, high)
+		levelHex = fmt.Sprintf("CD%02X%02X", high, low)
 	}
 
 	// 4. 组装 Body (不含首字节长度位)
@@ -2605,63 +2725,158 @@ func (a *App) BuildRedeemHex(code string) string {
 	return strings.ToUpper(finalHex)
 }
 
+// runMeatTask 执行肉类相关任务
 func (a *App) runMeatTask(config map[string]interface{}) {
-	if a.ctx == nil || a.activeConn == nil {
+	// 从配置中获取各个选项的状态
+	collectMeat, _ := config["collectMeat"].(bool)
+	eatMeat, _ := config["eatMeat"].(bool)
+	eatNeighbors, _ := config["eatNeighbors"].(bool)
+	eatGuilds, _ := config["eatGuilds"].(bool)
+	eatRankings, _ := config["eatRankings"].(bool)
+
+	// 检查是否有任何肉类任务被选中
+	hasAnyMeatTask := collectMeat || eatMeat || eatNeighbors || eatGuilds || eatRankings
+
+	// 如果没有选中任何任务，直接返回，不打印任何日志
+	if !hasAnyMeatTask {
 		return
 	}
 
+	// 检查连接状态
+	if a.ctx == nil || a.activeConn == nil {
+		fmt.Printf("⚠️ 游戏连接已断开，无法执行肉类任务 (collectMeat=%v, eatMeat=%v)\n",
+			collectMeat, eatMeat)
+
+		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+			"message": "⚠️ 游戏连接已断开，无法执行肉类任务",
+			"type":    "error",
+		})
+		return
+	}
+
+	// 🌟 关键修复：移除自动挂机模式检查，让一次性任务也能执行
+	// 注释掉或删除以下代码块
+	/*
+	   // 检查是否在自动挂机模式下
+	   a.gdMutex.RLock()
+	   isAutoMode := a.isGardenLoopRunning
+	   a.gdMutex.RUnlock()
+
+	   if !isAutoMode {
+	       fmt.Println("⏸️ 不在自动挂机模式，跳过肉类任务")
+	       return
+	   }
+	*/
+
+	// 打印当前任务状态（调试用）
+	fmt.Printf("🥩 执行肉类任务: collectMeat=%v, eatMeat=%v, neighbors=%v, guilds=%v, rankings=%v\n",
+		collectMeat, eatMeat, eatNeighbors, eatGuilds, eatRankings)
+
 	// --- 1. 收肉 ---
-	if active, ok := config["collectMeat"].(bool); ok && active {
-		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]string{
+	if collectMeat {
+		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
 			"message": "🥩 正在收肉...",
 			"type":    "default",
 		})
-		Packet := "0E0000008617000000C81B398F41009203000E0000008617000000C81B398F41009202000E0000008617000000307A2F124100920100"
-		p, _ := hex.DecodeString(Packet)
-		a.activeConn.SendToServer(2, p)
-		// 设置较短的随机延迟，防止发包太快被服务器屏蔽
-		time.Sleep(time.Duration(300+rand.Intn(201)) * time.Millisecond)
-	}
 
-	// --- 2. 吃邻居肉 ---
-	if active, ok := config["eatMeat"].(bool); ok && active {
-		a.isEatingMeat = true // 开启全局拦截标记
-
-		// 定义任务列表：前端 key, 打印消息, 指令 Hex
-		meatTasks := []struct {
-			Key     string
-			Message string
-			Packet  string
-		}{
-			{"eatNeighbors", "🍖 正在扫描 [邻居列表] 搜索肉类...", "0F0000002E1A00000036B279A1410093020164"},
-			{"eatGuilds", "🛡️ 正在扫描 [工会列表] 搜索肉类...", "0F0000002E1A00000036B279A1410093030164"},
-			{"eatRankings", "🏆 正在扫描 [排行榜列表] 搜索肉类...", "0F0000002E1A00000036B279A1410093040164"},
+		// 发送收肉指令
+		meatPackets := []string{
+			"0E0000008617000000C81B398F4100920300", // 收大肉
+			"0E0000008617000000C81B398F4100920200", // 收中肉
+			"0E0000008617000000307A2F124100920100", // 收小肉
 		}
 
-		for _, task := range meatTasks {
-			// 检查前端是否勾选了对应的子选项
-			if selected, ok := config[task.Key].(bool); ok && selected {
-				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]string{
-					"message": task.Message,
-					"type":    "default",
-				})
+		for _, packetHex := range meatPackets {
+			if a.activeConn == nil {
+				return
+			}
+			p, _ := hex.DecodeString(packetHex)
+			a.activeConn.SendToServer(2, p)
+			time.Sleep(time.Duration(300+rand.Intn(201)) * time.Millisecond)
+		}
 
-				if a.activeConn != nil {
-					req, _ := hex.DecodeString(task.Packet)
-					a.activeConn.SendToServer(2, req)
+		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+			"message": "✅ 收肉完成",
+			"type":    "success",
+		})
+	}
 
-					// 每发送一种列表，给 3 秒的处理时间
-					// 此时 initSunnyConfig 收到 D2E5 包会触发 parseNeighborList 和吃肉逻辑
-					time.Sleep(3 * time.Second)
+	// --- 2. 吃肉逻辑 ---
+	if eatMeat {
+		// 检查是否有任何吃肉选项被选中
+		if !eatNeighbors && !eatGuilds && !eatRankings {
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": "⚠️ 请至少选择一个吃肉来源（邻居/工会/排行榜）",
+				"type":    "warning",
+			})
+			return
+		}
+
+		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+			"message": "🍖 开始扫描肉类...",
+			"type":    "default",
+		})
+
+		a.isEatingMeat = true
+		defer func() { a.isEatingMeat = false }()
+
+		// 定义需要扫描的列表
+		scanTargets := []struct {
+			Name    string
+			Packet  string
+			Enabled bool
+		}{
+			{"邻居列表", "0F0000002E1A00000036B279A1410093020164", eatNeighbors},
+			{"工会列表", "0F0000002E1A00000036B279A1410093030164", eatGuilds},
+			{"排行榜", "0F0000002E1A00000036B279A1410093040164", eatRankings},
+		}
+
+		// 遍历扫描每个选中的列表
+		for _, target := range scanTargets {
+			if !target.Enabled {
+				continue
+			}
+
+			// 检查是否收到停止信号（如果是在自动挂机循环中）
+			select {
+			case <-a.stopGardenLoop:
+				fmt.Println("🛑 收到停止信号，中断肉类扫描")
+				return
+			default:
+			}
+
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": fmt.Sprintf("🔍 正在扫描 %s 搜索肉类...", target.Name),
+				"type":    "default",
+			})
+
+			if a.activeConn == nil {
+				return
+			}
+
+			req, _ := hex.DecodeString(target.Packet)
+			a.activeConn.SendToServer(2, req)
+
+			// 等待处理
+			waitTime := 3 + rand.Intn(2) // 3-4秒
+			for i := 0; i < waitTime; i++ {
+				select {
+				case <-a.stopGardenLoop:
+					return
+				default:
+					time.Sleep(1 * time.Second)
 				}
 			}
 		}
 
-		// 所有选中的列表都扫完了
-		a.isEatingMeat = false
-		time.Sleep(time.Duration(300+rand.Intn(201)) * time.Millisecond)
+		// 所有列表扫描完成
+		if eatNeighbors || eatGuilds || eatRankings {
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": "✅ 肉类扫描完成",
+				"type":    "success",
+			})
+		}
 	}
-
 }
 
 func (a *App) runVeggieTask(config map[string]interface{}) {
@@ -3505,6 +3720,197 @@ func hexToInt(hexStr string) int {
 	return int(value)
 }
 
+// 辅助函数：min
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// 在文件末尾添加这些函数
+
+// DownloadAndInstallCert 下载并安装证书
+func (a *App) DownloadAndInstallCert() (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+
+	// 1. 检查证书是否已安装（通过检查是否能正常启动代理来判断）
+	isInstalled := a.checkCertInstalled()
+	if isInstalled {
+		result["success"] = true
+		result["message"] = "证书已安装，无需重复操作"
+		result["needRestart"] = false
+		return result, nil
+	}
+
+	// 2. 下载证书
+	certPath, err := a.downloadCert()
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. 根据操作系统安装证书
+	err = a.installCertByOS(certPath)
+	if err != nil {
+		result["success"] = false
+		result["message"] = fmt.Sprintf("证书下载成功但安装失败: %v", err)
+		result["needRestart"] = false
+		result["certPath"] = certPath
+		return result, nil
+	}
+
+	result["success"] = true
+	result["message"] = "证书已成功安装，需要重启电脑完成最后配置"
+	result["needRestart"] = true
+	result["certPath"] = certPath
+	return result, nil
+}
+
+// 检查证书是否已安装
+func (a *App) checkCertInstalled() bool {
+	if runtime.GOOS == "windows" {
+		// Windows: 检查证书存储
+		cmd := exec.Command("certutil", "-verifystore", "Root", "SunnyNet")
+		err := cmd.Run()
+		return err == nil
+	} else if runtime.GOOS == "darwin" {
+		// Mac: 检查钥匙串
+		cmd := exec.Command("security", "find-certificate", "-c", "SunnyNet", "/Library/Keychains/System.keychain")
+		err := cmd.Run()
+		return err == nil
+	}
+	return false
+}
+
+// 下载证书
+func (a *App) downloadCert() (string, error) {
+	// 创建临时目录
+	tempDir := filepath.Join(os.TempDir(), "cishen_helper_cert")
+	os.MkdirAll(tempDir, 0755)
+
+	certURL := "http://127.0.0.1:2025/ssl/ca.der"
+	certPath := filepath.Join(tempDir, "SunnyNet.der")
+
+	// 下载证书
+	resp, err := http.Get(certURL)
+	if err != nil {
+		return "", fmt.Errorf("无法连接到本地代理服务器: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("证书下载失败，状态码: %d", resp.StatusCode)
+	}
+
+	// 保存证书
+	out, err := os.Create(certPath)
+	if err != nil {
+		return "", fmt.Errorf("创建证书文件失败: %v", err)
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("保存证书失败: %v", err)
+	}
+
+	return certPath, nil
+}
+
+// 根据操作系统安装证书
+func (a *App) installCertByOS(certPath string) error {
+	switch runtime.GOOS {
+	case "windows":
+		return a.installCertWindows(certPath)
+	case "darwin":
+		return a.installCertMac(certPath)
+	default:
+		return fmt.Errorf("不支持的操作系统: %s", runtime.GOOS)
+	}
+}
+
+// Windows安装证书
+func (a *App) installCertWindows(certPath string) error {
+	// 方法1: 使用 certutil 安装到受信任根证书
+	cmd := exec.Command("certutil", "-addstore", "Root", certPath)
+	if err := cmd.Run(); err != nil {
+		// 方法2: 尝试使用管理员权限重新运行
+		return a.runAsAdminWindows(certPath)
+	}
+	return nil
+}
+
+// Windows管理员权限运行
+func (a *App) runAsAdminWindows(certPath string) error {
+	// 使用 PowerShell 以管理员权限运行 certutil
+	psCmd := fmt.Sprintf(`Start-Process certutil -ArgumentList '-addstore', 'Root', '%s' -Verb RunAs`, certPath)
+	cmd := exec.Command("powershell", "-Command", psCmd)
+	return cmd.Start()
+}
+
+// Mac安装证书
+func (a *App) installCertMac(certPath string) error {
+	// 转换为 PEM 格式（Mac钥匙串通常需要PEM）
+	pemPath := strings.TrimSuffix(certPath, ".der") + ".pem"
+
+	// DER 转 PEM
+	derData, err := os.ReadFile(certPath)
+	if err != nil {
+		return err
+	}
+
+	// 简单的DER转PEM
+	pemBlock := &pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: derData,
+	}
+	pemData := pem.EncodeToMemory(pemBlock)
+
+	err = os.WriteFile(pemPath, pemData, 0644)
+	if err != nil {
+		return err
+	}
+
+	// 安装到系统钥匙串 - 使用 osascript 请求管理员权限
+	appleScript := fmt.Sprintf(`do shell script "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain %s" with administrator privileges`, pemPath)
+
+	scriptCmd := exec.Command("osascript", "-e", appleScript)
+	return scriptCmd.Run()
+}
+
+// 重启电脑
+func (a *App) RestartComputer() error {
+	switch runtime.GOOS {
+	case "windows":
+		cmd := exec.Command("shutdown", "/r", "/t", "5", "/c", "次神助手需要重启完成证书安装，5秒后自动重启")
+		return cmd.Start()
+	case "darwin":
+		cmd := exec.Command("osascript", "-e", `tell app "System Events" to restart`)
+		return cmd.Start()
+	default:
+		return fmt.Errorf("不支持自动重启")
+	}
+}
+
+// 检查代理状态
+func (a *App) CheckProxyStatus() map[string]interface{} {
+	result := make(map[string]interface{})
+	result["isCapturing"] = a.isConnected
+	result["certInstalled"] = a.checkCertInstalled()
+
+	// 检查代理端口是否可访问
+	client := http.Client{
+		Timeout: 2 * time.Second,
+	}
+	resp, err := client.Get("http://127.0.0.1:2025")
+	result["proxyAccessible"] = err == nil && resp != nil && resp.StatusCode == 200
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	return result
+}
+
 // GetMachineID 获取电脑唯一标识 (Windows版)
 func (a *App) GetMachineID() string {
 	var id string
@@ -3527,8 +3933,27 @@ func (a *App) GetMachineID() string {
 	return finalID
 }
 
-func (a *App) CheckAuthOnline(mID string) (bool, string, int) {
-	fmt.Printf("🔍 正在验证设备: [%s]\n", mID)
+// MD5加密机器码
+func (a *App) hashMachineID(mID string) string {
+	// 加盐增强安全性
+	salt := "cishenzhushou_salt_2024"
+	data := []byte(mID + salt)
+	hash := md5.Sum(data)
+	return hex.EncodeToString(hash[:])
+}
+
+// GetHashedMachineID 返回MD5加密后的机器码
+func (a *App) GetHashedMachineID() string {
+	rawID := a.GetMachineID()
+	return a.hashMachineID(rawID)
+}
+
+// 修改验证逻辑，使用MD5加密后的机器码
+func (a *App) CheckAuthOnline(rawMachineID string) (bool, string, int) {
+	// 对原始机器码进行MD5加密
+	hashedID := a.hashMachineID(rawMachineID)
+	fmt.Printf("🔍 正在验证设备MD5: [%s]\n", hashedID)
+
 	const authUrl = "https://gist.githubusercontent.com/dear510/e24f215a3f5534e5dc5971f7038643c6/raw/auth.txt"
 
 	client := http.Client{Timeout: 5 * time.Second}
@@ -3543,40 +3968,58 @@ func (a *App) CheckAuthOnline(mID string) (bool, string, int) {
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
+		// 跳过注释行
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+
 		parts := strings.Split(line, ":")
 		if len(parts) < 2 {
 			continue
 		}
 
-		cloudID := parts[0]
-		expireStr := parts[1]
+		cloudHash := parts[0] // MD5哈希值
+		expireStr := parts[1] // 有效期
+		level := 1            // 默认等级1
 
-		if cloudID == mID {
+		if len(parts) >= 3 {
+			if l, err := strconv.Atoi(parts[2]); err == nil {
+				level = l
+			}
+		}
+
+		// 比对MD5哈希值
+		if hashedID == cloudHash {
 			// 验证日期
 			expireDate, err := time.Parse("2006-01-02", expireStr)
-			if err != nil || time.Now().After(expireDate) {
+			if err != nil {
+				fmt.Printf("日期解析错误: %v\n", err)
+				return false, "DATE_ERROR", 0
+			}
+
+			if time.Now().After(expireDate) {
+				fmt.Printf("❌ 授权已过期: %s\n", expireStr)
 				return false, "EXPIRED", 0
 			}
 
-			// --- 核心修改：解析等级 ---
-			level := 1 // 默认普通用户
-			if len(parts) >= 3 {
-				if l, err := strconv.Atoi(parts[2]); err == nil {
-					level = l
-				}
-			}
-
-			a.UserLevel = level // 存入结构体
+			fmt.Printf("✅ 授权通过，等级: %d，有效期至: %s\n", level, expireStr)
+			a.UserLevel = level
 			return true, expireStr, level
 		}
 	}
+
+	fmt.Printf("❌ 未找到匹配的机器码MD5: %s\n", hashedID)
 	return false, "NOT_FOUND", 0
 }
 
-// 修改前端调用的方法，返回等级
+// 修改前端调用的验证方法
 func (a *App) CheckCurrentAuth() int {
-	mID := a.GetMachineID()
-	authorized, _, level := a.CheckAuthOnline(mID)
+	// 获取原始机器码
+	rawID := a.GetMachineID()
+	fmt.Printf("原始机器码: %s\n", rawID)
+
+	// 使用MD5加密后的版本进行验证
+	authorized, _, level := a.CheckAuthOnline(rawID)
 	if !authorized {
 		return 0
 	}
