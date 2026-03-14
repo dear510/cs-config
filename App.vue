@@ -22,7 +22,7 @@
         </div>
         <div 
           :class="['menu-item', activeTab === 'zhenbao' ? 'active' : '', userLevel < 1 ? 'locked-item' : '']" 
-          @click="userLevel >= 1 ? activeTab = 'zhenbao' : alert('❌ 该功能仅限高级用户使用！')"
+          @click="userLevel >= 1 ? activeTab = 'zhenbao' : alert('❌ 该功能需要等级1及以上权限！')"
         >
           <span class="icon">{{ userLevel < 1 ? '🔒' : '💎' }}</span>
           <div class="menu-info">
@@ -107,19 +107,28 @@
     </aside>
 
     <main class="main-content">
+      <header class="status-bar">
+        <div class="status-control" @click="toggleMonitor" :class="{ 'is-paused': !isCapturing }">
+          <span class="dot" :class="{ pulsing: isCapturing }"></span>
+          <span class="status-text">{{ isCapturing ? '正在监控系统' : '监控已停止' }}</span>
+          <small class="port-hint">PORT: 2025</small>
+        </div>
+        <div class="header-actions">
+          <!-- 日常任务页面的操作按钮 -->
+          <template v-if="activeTab === 'daily'">
+            <button class="clear-btn" @click="dailyLogs = []">🗑️ 清空日志</button>
+          </template>
+          
+          <!-- 珍宝拦截页面的操作按钮 -->
+          <template v-else-if="activeTab === 'zhenbao'">
+            <span class="stats-label">数据流</span>
+            <span class="stats-count">{{ zhenbaoLogs.length }}</span>
+            <button class="clear-btn" @click="zhenbaoLogs = []; hitLogs = []; sysLogs = [];">🗑️ 清空记录</button>
+          </template>
+        </div>
+      </header>
       
       <section v-if="activeTab === 'daily'" class="page-view animate-fade">
-        <header class="status-bar">
-          <div class="status-control" @click="toggleMonitor" :class="{ 'is-paused': !isCapturing }">
-            <span class="dot" :class="{ pulsing: isCapturing }"></span>
-            <span class="status-text">{{ isCapturing ? '正在监控系统' : '监控已停止' }}</span>
-            <small class="port-hint">PORT: 2025</small>
-          </div>
-          <div class="header-actions">
-            <button class="clear-btn" @click="dailyLogs = []">🗑️ 清空日志</button>
-          </div>
-        </header>
-
         <div class="daily-layout">
           <div class="tasks-columns-container">
             <div v-for="category in taskCategories" :key="category.id" class="task-column">
@@ -128,6 +137,10 @@
                 <div style="display: flex; align-items: center; gap: 6px;">
                   <span class="column-dot"></span>
                   <span style="font-weight: bold; font-size: 13px; color: #007aff;">{{ category.title }}</span>
+                  <!-- 显示该列所需的权限等级 -->
+                  <span v-if="getColumnRequiredLevel(category.id) > userLevel" class="column-level-tag">
+                    需等级{{ getColumnRequiredLevel(category.id) }}
+                  </span>
                 </div>
 
                 <div v-if="category.id === 'garden'" class="garden-afk-wrapper" @click.stop>
@@ -136,6 +149,7 @@
                       type="checkbox" 
                       v-model="currentConfigTask.config.gardenAFK" 
                       @change="handleGardenAFKChange"
+                      :disabled="userLevel < 3"
                     >
                     <span class="afk-text">自动挂机</span>
                   </label>
@@ -146,14 +160,21 @@
                 <div 
                   v-for="task in category.tasks" 
                   :key="task.id" 
-                  :class="['task-card-mini', task.selected ? 'is-selected' : '']"
-                  @click="openConfig(task)"
+                  :class="['task-card-mini', task.selected ? 'is-selected' : '', userLevel < getColumnRequiredLevel(category.id) ? 'locked-task' : '']"
+                  @click="userLevel >= getColumnRequiredLevel(category.id) ? openConfig(task) : alert(`❌ 该功能需要等级${getColumnRequiredLevel(category.id)}及以上权限！`)"
                 >
                   <div class="task-main">
-                    <div class="task-check">{{ task.selected ? '●' : '○' }}</div>
+                    <div class="task-check">
+                      <span v-if="userLevel < getColumnRequiredLevel(category.id)">🔒</span>
+                      <span v-else>{{ task.selected ? '●' : '○' }}</span>
+                    </div>
                     <div class="task-info">
-                      <div class="task-name">{{ task.name }}</div>
-                      <div class="task-desc">{{ task.desc }}</div>
+                      <div class="task-name" :class="{ 'locked-text': userLevel < getColumnRequiredLevel(category.id) }">
+                        {{ task.name }}
+                      </div>
+                      <div class="task-desc" :class="{ 'locked-text': userLevel < getColumnRequiredLevel(category.id) }">
+                        {{ task.desc }}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -268,9 +289,9 @@
                 
                 <div 
                   class="radar-toggle-btn pk-action-btn" 
-                  :class="{ 'pk-active': isPKEnabled }"
-                  @click.stop="togglePKPanel" 
-                  title="跨服切磋替换"
+                  :class="{ 'pk-active': isPKEnabled, 'locked': userLevel < 1 }"
+                  @click.stop="userLevel >= 1 ? togglePKPanel() : alert('❌ 该功能需要等级1及以上权限！')" 
+                  title="跨服切磋"
                 >
                   🥊
                 </div>
@@ -282,68 +303,65 @@
       </section>
 
       <section v-if="activeTab === 'zhenbao'" class="page-view animate-fade">
-        <header class="status-bar">
-          <div class="status-control" @click="toggleMonitor" :class="{ 'is-paused': !isCapturing }">
-            <span class="dot" :class="{ pulsing: isCapturing }"></span>
-            <span class="status-text">{{ isCapturing ? '正在监控系统' : '监控已停止' }}</span>
-            <small class="port-hint">PORT: 2025</small>
-          </div>
-          <div class="header-actions">
-            <span class="stats-label">数据流</span>
-            <span class="stats-count">{{ zhenbaoLogs.length }}</span>
-            <button class="clear-btn" @click="zhenbaoLogs = []; hitLogs = []; sysLogs = [];">🗑️ 清空记录</button>
-          </div>
-        </header>
+        <!-- 权限判断 -->
+        <div v-if="userLevel < 1" class="permission-denied">
+          <span class="lock-icon">🔒</span>
+          <h3>权限不足</h3>
+          <p>珍宝拦截需要等级1及以上权限</p>
+          <p class="current-level">当前等级: {{ userLevel }}</p>
+        </div>
 
-        <section class="log-viewport console-container">
-          <div v-if="activeRuleSummary || hitLogs.length > 0" class="sticky-top-info">
-            <div v-if="activeRuleSummary" class="console-card rule-summary-card"><pre>{{ activeRuleSummary }}</pre></div>
-            <div v-for="(hit, i) in hitLogs" :key="'hit-'+i" class="console-card hit-card"><div class="hit-msg">{{ hit }}</div></div>
-          </div>
+        <template v-else>
+          <section class="log-viewport console-container">
+            <div v-if="activeRuleSummary || hitLogs.length > 0" class="sticky-top-info">
+              <div v-if="activeRuleSummary" class="console-card rule-summary-card"><pre>{{ activeRuleSummary }}</pre></div>
+              <div v-for="(hit, i) in hitLogs" :key="'hit-'+i" class="console-card hit-card"><div class="hit-msg">{{ hit }}</div></div>
+            </div>
 
-          <div v-for="(item, i) in zhenbaoLogs" :key="'item-'+i" class="console-card item-with-action">
-            <div class="card-info">
-              <div class="user-meta">
-                <span class="uid-tag">卖家UID: {{ item.uid || '未知' }}</span>
-                <span class="uid-tag">区服: {{ item.district || '未知区服' }}</span>
-                <span class="uid-tag">部位: {{ item.itemType || '未知部位' }}</span>
+            <div v-for="(item, i) in zhenbaoLogs" :key="'item-'+i" class="console-card item-with-action">
+              <div class="card-info">
+                <div class="user-meta">
+                  <span class="uid-tag">卖家UID: {{ item.uid || '未知' }}</span>
+                  <span class="uid-tag">区服: {{ item.district || '未知区服' }}</span>
+                  <span class="uid-tag">部位: {{ item.itemType || '未知部位' }}</span>
+                </div>
+                <div class="console-row"><span class="console-label">价格：</span><span class="console-value gold-text">{{ item.price }}</span></div>
+                <div v-for="(attr, idx) in item.attributes" :key="idx" class="console-row" :style="{ color: getSoftColor(attr.color) }">
+                  <span class="console-label">词条{{ idx + 1 }}：</span><span class="console-value">{{ attr.name }} {{ attr.value.toFixed(2) }}%</span>
+                </div>
               </div>
-              <div class="console-row"><span class="console-label">价格：</span><span class="console-value gold-text">{{ item.price }}</span></div>
-              <div v-for="(attr, idx) in item.attributes" :key="idx" class="console-row" :style="{ color: getSoftColor(attr.color) }">
-                <span class="console-label">词条{{ idx + 1 }}：</span><span class="console-value">{{ attr.name }} {{ attr.value.toFixed(2) }}%</span>
+              <div class="card-action">
+                <button 
+                  class="manual-buy-btn" 
+                  :class="{ 
+                    'is-purchased': item.purchased, 
+                    'is-exhibiting': item.isLocked && !item.purchased,
+                    'is-cooling': isGlobalCooling && !item.isLocked && !item.purchased 
+                  }" 
+                  :disabled="item.purchased || item.isLocked || isGlobalCooling" 
+                  @click="handleManualBuy(item)"
+                >
+                  <span v-if="item.purchased">已发送</span>
+                  <span v-else-if="item.isLocked">公示中</span>
+                  <span v-else-if="isGlobalCooling">CD中</span>
+                  <span v-else>秒杀</span>
+                </button>
               </div>
+              <div class="console-divider"></div>
             </div>
-            <div class="card-action">
-              <button 
-                class="manual-buy-btn" 
-                :class="{ 
-                  'is-purchased': item.purchased, 
-                  'is-exhibiting': item.isLocked && !item.purchased,
-                  'is-cooling': isGlobalCooling && !item.isLocked && !item.purchased 
-                }" 
-                :disabled="item.purchased || item.isLocked || isGlobalCooling" 
-                @click="handleManualBuy(item)"
-              >
-                <span v-if="item.purchased">已发送</span>
-                <span v-else-if="item.isLocked">公示中</span>
-                <span v-else-if="isGlobalCooling">CD中</span>
-                <span v-else>秒杀</span>
-              </button>
+            
+            <div v-if="zhenbaoLogs.length === 0 && sysLogs.length === 0" class="empty-state-container">
+              <div class="scanner-wrapper">
+                <div class="scanner-ring"></div>
+                <div class="scanner-dot"></div>
+              </div>
+              <div class="scanning-text">
+                正在监听网卡数据流<span class="dot-ani">...</span>
+              </div>
+              <div class="scanning-sub">WAITING FOR PACKETS ON PORT 2025</div>
             </div>
-            <div class="console-divider"></div>
-          </div>
-          
-          <div v-if="zhenbaoLogs.length === 0 && sysLogs.length === 0" class="empty-state-container">
-            <div class="scanner-wrapper">
-              <div class="scanner-ring"></div>
-              <div class="scanner-dot"></div>
-            </div>
-            <div class="scanning-text">
-              正在监听网卡数据流<span class="dot-ani">...</span>
-            </div>
-            <div class="scanning-sub">WAITING FOR PACKETS ON PORT 2025</div>
-          </div>
-        </section>
+          </section>
+        </template>
       </section>
 
       <div v-if="showConfigModal" class="modal-overlay" @click.self="showConfigModal = false">
@@ -792,7 +810,7 @@
                   <div class="dungeon-config-item">
                     <label class="custom-check">
                       <input type="checkbox" v-model="currentConfigTask.config.redDiamondDrawReward"> 
-                      <span>召唤2w抽</span>
+                      <span>召唤2w抽各档奖励</span>
                     </label>
                   </div>
                 </div>
@@ -838,8 +856,8 @@
                 </div>
               </div>
 
-              <div class="config-group-title" style="margin-top:15px;" v-if="userLevel >= 2">奖励领取</div>
-              <div class="config-content-indent" v-if="userLevel >= 2">
+              <div class="config-group-title" style="margin-top:15px;" v-if="userLevel >= 5">奖励领取</div>
+              <div class="config-content-indent" v-if="userLevel >= 5">
                 <div class="dungeon-grid">
                   <div class="dungeon-config-item">
                     <label class="custom-check">
@@ -952,7 +970,7 @@
                   <div class="dungeon-config-item">
                     <label class="custom-check">
                       <input type="checkbox" v-model="currentConfigTask.config.rush"> 
-                      <span>(模版勿用)</span>
+                      <span>(敬请期待)</span>
                     </label>
                     <div class="input-group" v-if="currentConfigTask.config.rush">
                       次数: <input type="number" v-model.number="currentConfigTask.config.rushCount" class="mini-num" min="1">
@@ -1099,18 +1117,107 @@
       </div>
     </div>
 
+    <!-- 修改授权弹窗部分，移除CDK输入 -->
     <div v-if="!isAuthorized" class="auth-overlay">
       <div class="auth-card">
         <div class="auth-icon">🔒</div>
         <h2>系统未授权</h2>
+        
+        <!-- 显示MD5加密后的机器码 -->
         <div class="machine-id-box" @click="copyMachineID">
-          <span class="label">我的机器码:</span>
-          <code class="code">{{ machineID }}</code>
+          <span class="label">机器码:</span>
+          <code class="code">{{ hashedMachineID || '计算中...' }}</code>
         </div>
-        <div class="auth-tips">请将机器码发送给管理开通权限</div>
-        <button class="primary-btn" @click="checkAuth">重新验证</button>
+        
+        <div class="auth-tips">
+          <p>请将上面的机器码发送给管理员开通权限</p>
+          <p style="font-size: 11px; color: #666; margin-top: 5px;">点击机器码即可复制</p>
+        </div>
+        
+        <button class="primary-btn" @click="checkAuth" style="margin-top: 20px;">
+          🔄 重新验证
+        </button>
       </div>
     </div>
+
+    <!-- 证书安装引导弹窗 -->
+    <Transition name="fade">
+      <div v-if="showCertGuide && isAuthorized" class="auth-overlay" @click.self="showCertGuide = false">
+        <div class="auth-card" style="max-width: 500px;">
+          <div class="auth-icon">🔐</div>
+          <h2>首次使用配置</h2>
+          
+          <div v-if="!certInstallResult" class="cert-guide-content">
+            <p style="color: #ccc; margin-bottom: 20px; font-size: 14px;">
+              次神助手需要通过代理证书拦截游戏数据包，这是正常的安全配置。
+            </p>
+            
+            <div style="background: #1a1a1a; border-radius: 10px; padding: 15px; margin-bottom: 20px; text-align: left;">
+              <p style="color: #ffaa00; margin-bottom: 8px;">⚙️ 自动安装（推荐）</p>
+              <p style="color: #888; font-size: 13px; margin-bottom: 15px;">点击下方按钮自动下载并安装证书</p>
+              
+              <button 
+                class="primary-btn" 
+                @click="installCertificate" 
+                :disabled="certInstalling"
+                style="margin-top: 0;"
+              >
+                {{ certInstalling ? '⏳ 安装中...' : '📥 一键安装证书' }}
+              </button>
+            </div>
+            
+            <div style="border-top: 1px solid #222; padding-top: 15px;">
+              <p style="color: #666; font-size: 12px; margin-bottom: 10px;">如果自动安装失败，请手动操作：</p>
+              <button class="modal-btn secondary" @click="showManualGuide = !showManualGuide" style="width: 100%; padding: 8px;">
+                {{ showManualGuide ? '👆 隐藏指南' : '📖 查看手动安装指南' }}
+              </button>
+              
+              <div v-if="showManualGuide" style="margin-top: 15px; text-align: left; background: #0a0a0a; padding: 15px; border-radius: 8px;">
+                <p style="color: #007aff; margin-bottom: 8px; font-weight: bold;">Windows 手动安装：</p>
+                <ol style="color: #ccc; font-size: 12px; padding-left: 20px;">
+                  <li>打开浏览器访问 <code style="background: #000; padding: 2px 5px;">http://127.0.0.1:2025</code></li>
+                  <li>点击下载证书 (CA certificate)</li>
+                  <li>双击下载的 .der 文件</li>
+                  <li>选择“安装证书” → “本地计算机” → “受信任的根证书颁发机构”</li>
+                  <li>重启电脑</li>
+                </ol>
+                
+                <p style="color: #007aff; margin: 15px 0 8px; font-weight: bold;">Mac 手动安装：</p>
+                <ol style="color: #ccc; font-size: 12px; padding-left: 20px;">
+                  <li>打开浏览器访问 <code style="background: #000; padding: 2px 5px;">http://127.0.0.1:2025</code></li>
+                  <li>下载证书文件</li>
+                  <li>打开“钥匙串访问”应用</li>
+                  <li>将证书拖入“系统”钥匙串</li>
+                  <li>双击证书，展开“信任”，选择“始终信任”</li>
+                  <li>重启电脑</li>
+                </ol>
+              </div>
+            </div>
+            
+            <div v-if="certError" style="margin-top: 20px; color: #ff4757; font-size: 13px; background: rgba(255,71,87,0.1); padding: 10px; border-radius: 6px;">
+              ❌ {{ certError }}
+            </div>
+          </div>
+          
+          <!-- 安装成功界面 -->
+          <div v-else class="cert-success">
+            <div style="font-size: 48px; color: #2ed573; margin-bottom: 15px;">✓</div>
+            <h3 style="color: #2ed573;">安装成功！</h3>
+            <p style="color: #ccc; margin: 15px 0;">{{ certInstallResult.message }}</p>
+            
+            <div v-if="certInstallResult.needRestart" style="display: flex; gap: 10px; margin-top: 20px;">
+              <button class="modal-btn secondary" @click="showCertGuide = false" style="flex: 1;">稍后重启</button>
+              <button class="primary-btn" @click="window.go.main.App.RestartComputer()" style="flex: 1;">立即重启</button>
+            </div>
+            <button v-else class="primary-btn" @click="showCertGuide = false" style="margin-top: 20px;">开始使用</button>
+          </div>
+          
+          <div style="margin-top: 20px; font-size: 11px; color: #555;">
+            关闭监控后会自动清除代理设置，不影响正常上网
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -1119,7 +1226,7 @@ import { ref, reactive, onMounted, watch, computed, nextTick, onUnmounted } from
 import { EventsOn } from '../wailsjs/runtime'
 import { 
   UpdateRules, GetAttributeNames, GetCategoryNames, 
-  ToggleCapture, ManualBuy, CheckCurrentAuth, GetMachineID,
+  ToggleCapture, ManualBuy, CheckCurrentAuth, GetMachineID, GetHashedMachineID,
   // 假设你在 app.go 中新增了下面这个函数
   ExecuteDailyTasks, GetRemoteTargets
 } from '../wailsjs/go/main/App'
@@ -1128,6 +1235,7 @@ import {
 const activeTab = ref('daily') // 默认显示日常任务
 const isAuthorized = ref(false)
 const machineID = ref('')
+const hashedMachineID = ref('')
 
 // --- 日常任务相关变量 ---
 const isTaskRunning = ref(false)
@@ -1209,7 +1317,7 @@ const taskCategories = reactive([
       { 
         id: 'dungeon_all', // 任务ID
         name: '副本', 
-        desc: '提取钥匙/稿子&各副本通关', 
+        desc: '钥匙/稿子&各副本通关', 
         selected: false,
         // 核心：弹窗内要显示的复杂配置
         config: {
@@ -1262,7 +1370,7 @@ const taskCategories = reactive([
       { 
         id: 'garden_veggie', 
         name: '菜类', 
-        desc: '收菜/种菜/浇水/除虫/偷菜', 
+        desc: '收菜/种菜/浇水/除虫/扫菜/偷菜', 
         selected: false,
         config: {collectVeggie: true, buySeeds: true} // 预留配置
       },
@@ -1525,53 +1633,77 @@ const handleGardenAFKChange = async () => {
   await nextTick();
 
   try {
-    // 1. 定位菜园大类
     const gardenCategory = taskCategories.find(c => c.id === 'garden');
     if (!gardenCategory) return;
 
-    // 2. 获取当前总开关状态
     const isEnabled = currentConfigTask.value?.config?.gardenAFK || false;
 
-    // 3. 【核心优化】：如果用户关闭了总开关，自动取消所有子项勾选
     if (!isEnabled) {
       console.log("🧹 检测到关闭，正在重置 UI 勾选状态...");
+      
+      // 只重置菜园维护类的任务
       gardenCategory.tasks.forEach(task => {
-        // 取消大类任务的勾选状态（即左侧列表的勾选框）
         task.selected = false;
-
-        // 遍历 config，将所有布尔值设为 false
+        
+        // 重置该任务的配置
         if (task.config) {
-          Object.keys(task.config).forEach(key => {
-            if (typeof task.config[key] === 'boolean' && key !== 'gardenAFK') {
-              task.config[key] = false;
-            }
-          });
-          // 如果有特殊字段需要重置，也可以在这里处理
-          // 例如：task.config.veggieType = 'xiaomai';
+          // 根据任务类型重置特定字段
+          switch(task.id) {
+            case 'garden_meat':
+              task.config = {
+                collectMeat: false,
+                eatMeat: false,
+                eatNeighbors: false,
+                eatGuilds: false,
+                eatRankings: false
+              };
+              break;
+            case 'garden_veggie':
+              task.config = {
+                collectVeggie: false,
+                plantVeggie: false,
+                buySeeds: false,
+                veggieType: 'baicai',
+                scanVeggie: false,
+                interestedVeggies: [],
+                selectedUids: []
+              };
+              break;
+            case 'garden_egg':
+              task.config = {
+                shareEgg: false
+              };
+              break;
+          }
         }
       });
-      console.log("✅ UI 状态已清空");
-    }
-
-    // 4. 合并当前最新的配置（此时已是清空后的配置）发给后端
-    const combinedConfig = {};
-    gardenCategory.tasks.forEach(task => {
-      if (task.config) {
-        Object.assign(combinedConfig, JSON.parse(JSON.stringify(task.config)));
-      }
-    });
-
-    // 5. 调用后端同步
-    if (window.go?.main?.App?.ToggleGardenLoop) {
-      await window.go.main.App.ToggleGardenLoop(isEnabled, combinedConfig);
       
-      // 可选：给个前端提示
-      if (!isEnabled) {
-        addDailyLog("🛑 已停止自动挂机并重置所有选项", "warning");
+      console.log("✅ 菜园任务状态已清空");
+      
+      // 调用后端停止自动挂机
+      await window.go.main.App.ToggleGardenLoop(false, {});
+      
+    } else {
+      // 开启自动挂机时，收集所有菜园任务的配置
+      const combinedConfig = {};
+      gardenCategory.tasks.forEach(task => {
+        if (task.selected && task.config) {
+          Object.assign(combinedConfig, JSON.parse(JSON.stringify(task.config)));
+        }
+      });
+      
+      // 检查是否有选中的任务
+      const hasSelectedTasks = gardenCategory.tasks.some(t => t.selected);
+      if (!hasSelectedTasks) {
+        alert("⚠️ 请至少勾选一个菜园维护任务");
+        currentConfigTask.value.config.gardenAFK = false;
+        return;
       }
+      
+      await window.go.main.App.ToggleGardenLoop(true, combinedConfig);
     }
   } catch (err) {
-    console.error("❌ 联动清空失败:", err);
+    console.error("❌ 自动挂机切换失败:", err);
   }
 };
 
@@ -1644,7 +1776,7 @@ const applyPK = () => {
     ).then(() => {
         isPKEnabled.value = true;
         isPKPanelOpen.value = false;
-        alert(`✅ 替换已生效！\n目标: ${targetUser.value.uid}\n源: ${sourceUser.value.uid}`);
+        // alert(`✅ 替换已生效！\n目标: ${targetUser.value.uid}\n源: ${sourceUser.value.uid}`);
     });
 };
 
@@ -1709,6 +1841,15 @@ const newRule = reactive({
 
 const userLevel = ref(0); // 0:未授权, 1:普通, 2:高级
 const zhenbaoAutoRefresh = ref(false);
+
+// 获取每列所需的权限等级
+const getColumnRequiredLevel = (columnId) => {
+  // 日常任务、菜园维护、周期活动都需要等级3
+  if (['basic', 'garden', 'activity'].includes(columnId)) {
+    return 3
+  }
+  return 1 // 默认等级1
+}
 
 async function checkAuth() {
     const level = await window.go.main.App.CheckCurrentAuth();
@@ -1917,16 +2058,47 @@ onMounted(async () => {
    * 3. 权限与基础数据加载
    */
   try {
-    const rawId = await window.go.main.App.GetMachineID();
-    if (rawId) machineID.value = rawId.replace(/[\r\n]/g, "").trim();
+    console.log("开始获取机器码...")
+    const rawId = await GetMachineID()
+    console.log("获取到的原始机器码:", rawId)
+    
+    if (rawId) {
+      machineID.value = rawId.replace(/[\r\n]/g, "").trim()
+      console.log('原始机器码(处理后):', machineID.value)
+      
+      // 直接调用后端计算MD5
+      console.log("开始从后端获取MD5...")
+      const hashedId = await GetHashedMachineID()
+      hashedMachineID.value = hashedId.replace(/[\r\n]/g, "").trim()
+      console.log('后端返回的MD5机器码:', hashedMachineID.value)
+    } else {
+      console.error("获取到的机器码为空")
+    }
 
-    const level = await window.go.main.App.CheckCurrentAuth();
+    console.log("开始验证权限...")
+    const level = await CheckCurrentAuth()
+    console.log("权限验证结果:", level)
+    
     if (level > 0) {
-      isAuthorized.value = true;
-      userLevel.value = level;
+      isAuthorized.value = true
+      userLevel.value = level
+      
+      // 根据等级显示不同的欢迎消息
+      let levelMsg = ''
+      if (level >= 5) {
+        levelMsg = '✨ 尊贵的等级5用户，您拥有全部功能权限'
+      } else if (level >= 3) {
+        levelMsg = '🌟 等级3用户，您拥有日常功能权限'
+      } else {
+        levelMsg = '⭐ 等级1用户，您拥有珍宝拦截和跨服切磋权限'
+      }
+      
+      addDailyLog(levelMsg, 'success')
+    } else {
+      console.log("权限验证失败，用户未授权")
     }
   } catch (err) {
-    console.error("授权校验异常:", err);
+    console.error("授权校验异常:", err)
   }
 
   // 4. 拉取珍宝拦截相关的属性配置
@@ -1977,11 +2149,76 @@ onMounted(async () => {
 });
 
 // --- 其他操作方法 ---
-
 const copyMachineID = () => {
-  navigator.clipboard.writeText(machineID.value)
-  alert("机器码已复制。")
+  if (hashedMachineID.value) {
+    navigator.clipboard.writeText(hashedMachineID.value)
+    alert("✅ MD5机器码已复制，请发送给管理员")
+  }
 }
+
+// 证书安装相关
+const showCertGuide = ref(false)
+const certInstalling = ref(false)
+const certInstallResult = ref(null)
+const certError = ref('')
+
+// 检查代理状态
+const checkProxyStatus = async () => {
+    try {
+        const status = await window.go.main.App.CheckProxyStatus()
+        console.log('代理状态:', status)
+        
+        // 如果代理不可访问或证书未安装，显示引导
+        if (!status.proxyAccessible || !status.certInstalled) {
+            showCertGuide.value = true
+        }
+    } catch (err) {
+        console.error('检查代理状态失败:', err)
+    }
+}
+
+// 下载并安装证书
+const installCertificate = async () => {
+    certInstalling.value = true
+    certError.value = ''
+    certInstallResult.value = null
+    
+    try {
+        const result = await window.go.main.App.DownloadAndInstallCert()
+        certInstallResult.value = result
+        
+        if (result.success) {
+            if (result.needRestart) {
+                // 显示重启确认对话框
+                if (confirm('✅ 证书已安装成功！\n\n需要重启电脑使证书完全生效。\n是否立即重启？')) {
+                    await window.go.main.App.RestartComputer()
+                }
+            } else {
+                // 不需要重启，直接关闭引导
+                setTimeout(() => {
+                    showCertGuide.value = false
+                }, 2000)
+            }
+        } else {
+            certError.value = result.message
+        }
+    } catch (err) {
+        certError.value = err.message || '安装失败，请手动安装'
+    } finally {
+        certInstalling.value = false
+    }
+}
+
+// 手动安装指南
+const showManualGuide = ref(false)
+
+// 在 onMounted 中添加检查
+onMounted(async () => {
+    // ... 原有代码 ...
+    
+    // 检查代理和证书状态
+    await checkProxyStatus()
+})
 
 const syncAutoRefresh = async () => {
   try {
@@ -2441,7 +2678,7 @@ body, html {
   border-radius: 12px;
   display: flex;
   flex-direction: column;
-  height: 300px;
+  height: 250px;
 }
 .console-header {
   padding: 10px 15px;
@@ -2466,13 +2703,30 @@ body, html {
 .log-entry.info .log-message { color: #cfe2f3; }
 .log-entry.error .log-message { color: #ff4d4d; }
 
+/* 统一合并 action-footer 的定义 */
 .action-footer {
-  padding: 10px 0;
   display: flex;
+  align-items: center;
   justify-content: center;
-}
-.run-all-btn {
+  gap: 15px;
+  position: relative;
+  
+  /* 🌟 核心修正：加大底部内边距到 50px 以上 */
+  padding: 15px 20px 50px 20px; 
+  
+  /* 确保按钮不会因为内容多而被顶出屏幕 */
+  margin-top: auto; 
+  
+  /* 强制该容器在 Flex 布局中不收缩 */
+  flex-shrink: 0; 
+  
   width: 100%;
+  box-sizing: border-box;
+}
+
+.run-all-btn {
+  /* 🌟 核心修正 3：改为 flex: 1 让它自适应 🌱 和 🥊 图标的空间 */
+  flex: 1; 
   max-width: 400px;
   padding: 16px;
   background: #007aff;
@@ -2483,37 +2737,70 @@ body, html {
   cursor: pointer;
   font-size: 1rem;
   transition: 0.2s;
+  
+  /* 确保文字不会因为宽度缩放而折行 */
+  white-space: nowrap; 
+}
+
+/* 移动端或窄屏适配：如果横向太挤，可以允许折行 */
+@media (max-width: 400px) {
+  .action-footer {
+    flex-wrap: wrap; /* 空间不够时，图标和按钮分两行 */
+  }
 }
 .run-all-btn:hover:not(:disabled) { background: #0062cc; transform: scale(1.02); }
 .run-all-btn:disabled { background: #222; color: #555; cursor: not-allowed; }
 
-/* 1. 容器设置 */
-.action-footer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 15px;
-  position: relative; /* 基础参考 */
-}
 
 .radar-wrapper {
   position: relative; /* 🌟 关键：让弹窗相对于这个容器定位 */
 }
 
-/* 2. 气泡小浮窗 */
+/* 浮窗主体容器 */
 .radar-popover {
   position: absolute;
-  bottom: 60px;    /* 距离图标顶部的距离 */
-  right: 0;        /* 与图标右对齐 */
-  width: 280px;    /* 窄一点，像客服窗 */
-  background: #1e272e; /* 深色背景 */
+  bottom: 60px;
+  right: 0;
+  width: 280px;
+  /* 🌟 限制整个弹窗的最大高度，防止遮挡上方重要UI */
+  max-height: 400px; 
+  background: #1e272e;
   border: 1px solid #3d4e5f;
   border-radius: 12px;
   box-shadow: 0 10px 25px rgba(0,0,0,0.5);
   z-index: 999;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: hidden; /* 保证圆角不被切掉 */
+}
+
+/* 🌟 新增：滚动区域设置 */
+.popover-body {
+  flex: 1;            /* 自动撑开 */
+  overflow-y: auto;   /* 词条多了自动显示滚动条 */
+  padding: 4px 0;     /* 稍微留白 */
+}
+
+/* 美化一下滚动条，让它看起来更高级 */
+.popover-body::-webkit-scrollbar {
+  width: 5px;
+}
+.popover-body::-webkit-scrollbar-thumb {
+  background: #3d4e5f;
+  border-radius: 10px;
+}
+.popover-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 词条样式微调，增加点击反馈感 */
+.mini-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  transition: background 0.2s;
+}
+.mini-item:hover {
+  background: rgba(46, 204, 113, 0.1); /* 鼠标悬停变浅绿 */
 }
 
 /* 气泡下面的那个小三角（指向 🌱） */
@@ -2544,10 +2831,6 @@ body, html {
   font-size: 18px;
 }
 
-.mini-item {
-  padding: 8px;
-  border-bottom: 1px solid #3d4e5f;
-}
 
 .mini-info {
   display: flex;
@@ -4166,6 +4449,74 @@ body, html {
 }
 
 /* ========== 授权覆盖层 (Auth) ========== */
+/* 权限相关样式 */
+.column-level-tag {
+  font-size: 9px;
+  padding: 2px 4px;
+  background: rgba(255, 71, 87, 0.2);
+  color: #ff4757;
+  border-radius: 3px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+.locked-task {
+  opacity: 0.6;
+  cursor: not-allowed !important;
+}
+
+.locked-task:hover {
+  background: #0a0a0a !important;
+  border-color: #1a1a1a !important;
+}
+
+.locked-text {
+  color: #666 !important;
+}
+
+.afk-text.disabled {
+  color: #666 !important;
+  opacity: 0.5;
+}
+
+.console-placeholder {
+  background: #000;
+  border: 1px solid #1a1a1a;
+  border-radius: 12px;
+  height: 300px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #666;
+  font-size: 13px;
+}
+
+.lock-icon-small {
+  font-size: 24px;
+  opacity: 0.3;
+}
+
+.action-footer-placeholder {
+  padding: 10px 0;
+  display: flex;
+  justify-content: center;
+}
+
+.action-footer-placeholder .run-all-btn.disabled {
+  width: 100%;
+  max-width: 400px;
+  padding: 16px;
+  background: #222;
+  color: #555;
+  border: none;
+  border-radius: 12px;
+  font-weight: bold;
+  cursor: not-allowed;
+  font-size: 1rem;
+}
+
 .auth-overlay {
   position: fixed; top: 0; left: 0; right: 0; bottom: 0;
   background: rgba(0, 0, 0, 0.9); backdrop-filter: blur(10px);
