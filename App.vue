@@ -5,7 +5,7 @@
         <span class="logo">🎮</span>
         <div class="brand-text">
           <h2>次神助手</h2>
-          <small>v2.6 </small>
+          <small>v2.6.1 </small>
         </div>
       </div>
 
@@ -46,9 +46,22 @@
             </div>
             <div class="form-group search-select-container">
               <label>目标属性 (不填为不限)</label>
-              <input v-model="searchKeyword" class="dark-input" placeholder="输入关键词" @focus="showDropdown = true" @blur="setTimeout(() => showDropdown = false, 200)">
-              <div v-if="showDropdown && filteredAttributes.length > 0" class="search-dropdown">
-                <div v-for="name in filteredAttributes" :key="name" @click="selectAttribute(name)" class="dropdown-item">{{ name }}</div>
+              <input 
+                v-model="searchKeyword" 
+                class="dark-input" 
+                placeholder="输入关键词" 
+                @click.stop="showDropdown = !showDropdown" 
+                @input="showDropdown = true"
+              >
+              <div v-if="showDropdown && filteredAttributes.length > 0" class="search-dropdown" @click.stop>
+                <div 
+                  v-for="name in filteredAttributes" 
+                  :key="name" 
+                  @click="selectAttribute(name)" 
+                  class="dropdown-item"
+                >
+                  {{ name }}
+                </div>
               </div>
             </div>
             <div class="form-group">
@@ -209,14 +222,53 @@
                       <span class="close-mini" @click.stop="isRadarPanelOpen = false">×</span>
                     </div>
                     <div class="popover-body">
-                      <div v-for="item in scanResults" :key="item.uid + item.pos" class="mini-item">
-                        <div class="mini-info">
-                          <span class="m-name">{{ item.name }}</span>
-                          <span class="m-time">{{ item.fixedTime }}</span>
+                      <!-- 修改这里：保持原有结构，只调整时间样式 -->
+                      <div v-for="(item, index) in scanResults" :key="item.uid + item.pos" class="mini-item">
+                        <div class="item-header">
+                          <div class="mini-info">
+                            <span class="m-name">{{ item.name }}</span>
+                            <!-- 时间放到右边 -->
+                            <span class="m-time">{{ item.fixedTime }}</span>
+                          </div>
+                          <button class="delete-item-btn" @click.stop="removeScanItem(index)" title="删除此条">×</button>
                         </div>
                         <div class="m-desc">UID: {{ item.uid }} | 昵称: {{ item.nickname }}</div>
                       </div>
+                      
                       <div v-if="scanResults.length === 0" class="mini-empty">🌱 暂无变异情报...</div>
+
+                      <!-- 推送区域 - 只在有数据时显示 -->
+                      <div v-if="scanResults.length > 0" class="push-section">
+                        <div class="push-header">
+                          <span class="push-icon">📱</span>
+                          <span class="push-title">微信推送</span>
+                        </div>
+                        
+                        <!-- 群组选择 - 美化版本 -->
+                        <div class="group-selector-modern">
+                          <div class="select-wrapper">
+                            <select v-model="selectedPushGroup" class="modern-select">
+                              <option value="cs901linda">🌍 901-920区</option>
+                              <option value="cs921linda">🌏 921-940区</option>
+                              <option value="cs941linda">🌎 941-960区</option>
+                              <option value="cs900linda">🌍 961-980区</option>
+                              <option value="cs981linda">🌏 981-1000区</option>
+                            </select>
+                            <div class="select-arrow-modern">▼</div>
+                          </div>
+                        </div>
+                        
+                        <!-- 推送按钮 -->
+                        <button class="push-btn" @click.stop="pushToWeChat" :disabled="isPushing">
+                          <span v-if="!isPushing">📤 发送</span>
+                          <span v-else>⏳ 推送中... ({{ pushProgress }})</span>
+                        </button>
+                        
+                        <!-- 推送结果提示 -->
+                        <div v-if="pushResult" class="push-result" :class="{ 'success': pushSuccess, 'error': !pushSuccess }">
+                          {{ pushResult }}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </transition>
@@ -768,6 +820,34 @@
                     </button>  
                   </div>
                 </div>
+
+                <div class="dungeon-config-item" style="display: flex; align-items: center; margin-top: 8px;">
+                  <label class="custom-check" style="margin-left: 0;">
+                    <input 
+                      type="checkbox" 
+                      v-model="currentConfigTask.config.stealVeggie"
+                    > 
+                    <span>偷菜 (需配合自动挂机)</span>
+                  </label>
+                  
+                  <!-- 如果偷菜被选中但没有扫菜情报时的提示 -->
+                  <span 
+                    v-if="currentConfigTask.config.stealVeggie && scanResults.length === 0" 
+                    class="warning-tip"
+                    style="margin-left: 12px; font-size: 11px; color: #ff9500;"
+                  >
+                    ⚠️ 暂无扫菜情报
+                  </span>
+                  
+                  <!-- 如果偷菜被选中且有扫菜情报时的提示 -->
+                  <span 
+                    v-if="currentConfigTask.config.stealVeggie && scanResults.length > 0" 
+                    class="success-tip"
+                    style="margin-left: 12px; font-size: 11px; color: #2ecc71;"
+                  >
+                    ✅ {{ scanResults.length }} 个目标待偷
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -1094,7 +1174,7 @@
               1. 在模块中输入【目标玩家UID】及【所属区服】。<br>
               2. 在好友列表中选定一位【源替换好友】。<br>
               3. 启动任务后，点开好友列表点击该好友，即可定向切磋目标玩家。
-              4. 目前云端名单仅更新至1-1000区, 之后大区的id信息作者将尽快完善。
+              4. 目前云端名单仅更新至1-2200区, 之后大区的id信息作者将尽快完善。
             </li>
           </ul>
 
@@ -1276,12 +1356,22 @@ const updateBeijingTime = () => {
 let timer = null
 
 onMounted(() => {
+  // --- 时间定时器逻辑 ---
   updateBeijingTime()
-  timer = setInterval(updateBeijingTime, 1000) // 每秒更新一次
+  timer = setInterval(updateBeijingTime, 1000)
+
+  // --- 下拉框全局点击逻辑 ---
+  // 监听全局点击，实现点击空白处关闭下拉框
+  window.addEventListener('click', closeDropdown)
 })
 
 onUnmounted(() => {
-  if (timer) clearInterval(timer) // 销毁组件时清除定时器，防止内存泄漏
+  // --- 清除定时器 ---
+  if (timer) clearInterval(timer)
+
+  // --- 移除全局点击监听 ---
+  // 这一步非常重要！如果不移除，每次切换页面都会多出一个监听器，导致程序越来越卡
+  window.removeEventListener('click', closeDropdown)
 })
 
 
@@ -1372,7 +1462,16 @@ const taskCategories = reactive([
         name: '菜类', 
         desc: '收菜/种菜/浇水/除虫/扫菜/偷菜', 
         selected: false,
-        config: {collectVeggie: true, buySeeds: true} // 预留配置
+        config: {
+          collectVeggie: true,
+          plantVeggie: false,
+          buySeeds: true,
+          veggieType: 'baicai',
+          scanVeggie: false,
+          stealVeggie: false,
+          interestedVeggies: [],
+          selectedUids: []
+        }
       },
       { 
         id: 'garden_egg', 
@@ -1543,6 +1642,19 @@ const remoteVeggies = ref({});
 const scanResults = ref([])
 const isRadarPanelOpen = ref(false);
 
+// 添加删除单个条目的方法
+const removeScanItem = (index) => {
+  scanResults.value.splice(index, 1)
+  
+  // 删除后同步更新后端
+  if (scanResults.value.length > 0) {
+    syncStealTargetsToBackend();
+  } else {
+    // 如果全部删除了，也同步空数组
+    window.go.main.App.UpdateStealTargets([]);
+  }
+};
+
 // 获取已选作物的数量（用于界面显示）
 const selectedVeggieNames = computed(() => {
   const ids = currentConfigTask.value?.config?.interestedVeggies || []
@@ -1579,6 +1691,56 @@ const toggleInterestedVeggie = (key) => {
   // 4. 强制触发响应式更新
   currentConfigTask.value.config.interestedVeggies = [...arr];
 };
+
+// 微信推送相关变量
+const selectedPushGroup = ref('cs900linda') // 默认选择通用群组
+const isPushing = ref(false)
+const pushProgress = ref('')
+const pushResult = ref('')
+const pushSuccess = ref(false)
+
+// 微信推送扫菜结果
+const pushToWeChat = async () => {
+  if (scanResults.value.length === 0) {
+    pushResult.value = '没有可推送的扫菜结果'
+    pushSuccess.value = false
+    return
+  }
+
+  isPushing.value = true
+  pushProgress.value = '准备中...'
+  pushResult.value = ''
+  
+  try {
+    // 调用后端推送方法，传入扫菜结果和选择的群组
+    const result = await window.go.main.App.PushVeggieResultsToWeChat(
+      scanResults.value, 
+      selectedPushGroup.value
+    )
+    
+    if (result.success) {
+      pushSuccess.value = true
+      pushResult.value = `✅ 推送成功！共 ${result.count} 条记录`
+      // 推送成功后也同步一次（确保数据一致性）
+      await syncStealTargetsToBackend();
+    } else {
+      pushSuccess.value = false
+      pushResult.value = `❌ 推送失败：${result.message || '未知错误'}`
+    }
+  } catch (err) {
+    console.error('推送错误:', err)
+    pushSuccess.value = false
+    pushResult.value = `❌ 推送异常：${err.message || '未知错误'}`
+  } finally {
+    isPushing.value = false
+    pushProgress.value = ''
+    
+    // 3秒后清除结果提示
+    setTimeout(() => {
+      pushResult.value = ''
+    }, 3000)
+  }
+}
 
 // 1. 打开弹窗并加载数据
 const openTargetModal = async () => {
@@ -1665,6 +1827,7 @@ const handleGardenAFKChange = async () => {
                 buySeeds: false,
                 veggieType: 'baicai',
                 scanVeggie: false,
+                stealVeggie: false,
                 interestedVeggies: [],
                 selectedUids: []
               };
@@ -1699,11 +1862,52 @@ const handleGardenAFKChange = async () => {
         currentConfigTask.value.config.gardenAFK = false;
         return;
       }
+
+      // 🌟 新增：如果开启了偷菜功能，检查扫菜情报并同步
+      if (combinedConfig.stealVeggie) {
+        console.log("🔍 检测到偷菜功能开启，检查扫菜情报...");
+        
+        if (scanResults.value.length === 0) {
+          alert("⚠️ 开启偷菜功能需要先有扫菜情报！请先执行扫菜");
+          currentConfigTask.value.config.gardenAFK = false;
+          return;
+        }
+
+        console.log(`📊 当前扫菜情报数量: ${scanResults.value.length}`);
+        
+        // 同步偷菜目标到后端
+        try {
+          console.log("🔄 正在同步偷菜目标到后端...");
+          
+          // 将前端数据转换为后端需要的 Veggie 格式
+          const backendTargets = scanResults.value.map(item => ({
+            uid: item.uid,  // 已经是字符串
+            name: item.name,
+            veggieType: "",  // 如果前端没有存储，暂时留空
+            matureTime: item.matureTime,
+            pos: item.pos,
+            district: "",    // 可选，留空
+            nickname: item.nickname
+          }));
+          
+          console.log("📤 发送到后端的偷菜目标:", backendTargets);
+          await window.go.main.App.UpdateStealTargets(backendTargets);
+          console.log("✅ 偷菜目标同步成功");
+        } catch (err) {
+          console.error("❌ 偷菜目标同步失败:", err);
+          alert("❌ 偷菜目标同步失败，请重试");
+          currentConfigTask.value.config.gardenAFK = false;
+          return;
+        }
+      }
       
+      // 调用后端开启自动挂机
+      console.log("🚀 调用后端开启自动挂机，配置:", combinedConfig);
       await window.go.main.App.ToggleGardenLoop(true, combinedConfig);
     }
   } catch (err) {
     console.error("❌ 自动挂机切换失败:", err);
+    alert(`❌ 自动挂机切换失败: ${err.message || '未知错误'}`);
   }
 };
 
@@ -1935,8 +2139,32 @@ const closeUpdateModal = () => {
   localStorage.setItem('lastVersion', '2.4')
 }
 
-// --- 珍宝拦截逻辑 ---
+// 添加扫菜同步函数
+const syncStealTargetsToBackend = async () => {
+  if (scanResults.value.length === 0) return;
+  
+  console.log("🔄 正在同步偷菜目标到后端，数量:", scanResults.value.length);
+  
+  try {
+    // 将前端数据转换为后端需要的 Veggie 格式
+    const backendTargets = scanResults.value.map(item => ({
+      uid: item.uid,  // 已经是字符串
+      name: item.name,
+      veggieType: "",  // 如果前端没有存储，可能需要从别处获取
+      matureTime: item.matureTime,
+      pos: item.pos,
+      district: "",    // 可选
+      nickname: item.nickname
+    }));
+    
+    await window.go.main.App.UpdateStealTargets(backendTargets);
+    console.log("✅ 偷菜目标同步成功");
+  } catch (err) {
+    console.error("❌ 偷菜目标同步失败:", err);
+  }
+};
 
+// --- 珍宝拦截逻辑 ---
 const filteredAttributes = computed(() => {
   const all = attributeOptions.value || []
   if (!searchKeyword.value) return all
@@ -1945,8 +2173,12 @@ const filteredAttributes = computed(() => {
 })
 
 const selectAttribute = (name) => {
-  newRule.keyword = name
-  searchKeyword.value = name 
+  searchKeyword.value = name
+  showDropdown.value = false // 选中后关闭
+}
+
+// 核心修复：点击外部关闭
+const closeDropdown = () => {
   showDropdown.value = false
 }
 
@@ -1991,7 +2223,7 @@ onMounted(async () => {
         });
 
         const newRecord = {
-          uid: decimalUid,
+          uid: decimalUid.toString(),
           nickname: nickname, // 🌟 存储查到的名字
           name: v.name,
           pos: v.pos,
@@ -2001,7 +2233,7 @@ onMounted(async () => {
 
         // 4. 去重逻辑
         const existingIndex = scanResults.value.findIndex(
-          item => item.uid === decimalUid && item.pos === v.pos
+          item => item.uid === decimalUid.toString() && item.pos === v.pos
         );
 
         if (existingIndex !== -1) {
@@ -2018,6 +2250,9 @@ onMounted(async () => {
       if (scanResults.value.length > 50) {
         scanResults.value = scanResults.value.slice(0, 50);
       }
+
+      // 7. 自动同步偷菜目标到后端
+      syncStealTargetsToBackend();
     });
 
     // --- 原有监听逻辑 ---
@@ -2214,8 +2449,6 @@ const showManualGuide = ref(false)
 
 // 在 onMounted 中添加检查
 onMounted(async () => {
-    // ... 原有代码 ...
-    
     // 检查代理和证书状态
     await checkProxyStatus()
 })
@@ -2297,6 +2530,10 @@ body, html {
   display: flex; flex-direction: column; box-sizing: border-box; 
   z-index: 10;
   --wails-draggable: drag;
+  display: flex;
+  flex-direction: column;
+  height: 100vh; /* 占据整个视口高度 */
+  overflow: hidden;
 }
 
 .brand { padding: 25px; border-bottom: 1px solid #1a1a1a; }
@@ -2329,9 +2566,9 @@ body, html {
 
 /* 侧边栏配置包装器 */
 .config-wrapper {
-  flex-grow: 1;
-  overflow-y: auto;
-  padding: 0 20px 20px;
+  flex: 1;             /* 占据剩余的所有空间 */
+  overflow-y: auto;    /* 内容多了自动显示滚动条 */
+  padding-right: 8px;  /* 给滚动条留点呼吸感 */
 }
 
 /* 规则列表外层容器 */
@@ -2848,7 +3085,13 @@ body, html {
 }
 
 .m-name { color: #fff; font-size: 13px; font-weight: bold; }
-.m-time { color: #f1c40f; font-size: 12px; }
+.m-time {
+  color: #ffd700;
+  font-size: 12px;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-weight: 500;
+  opacity: 0.9;
+}
 .m-desc { color: #95a5a6; font-size: 11px; }
 
 /* 3. 动画：向上弹出的轻盈感 */
@@ -3195,13 +3438,15 @@ body, html {
   white-space: nowrap;
 }
 
-/* 核心日志控制台列表 */
+/* 修改珍宝拦截页面的日志容器样式 */
 .console-container {
+  flex: 1;               /* 让它占据右侧剩余的所有空间 */
+  overflow-y: auto;      /* 关键：允许垂直滚动 */
   padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  overflow-y: auto;
+  gap: 15px;             /* 卡片之间的间距 */
+  max-height: calc(100vh - 100px); /* 限制最大高度，防止撑开父容器 */
 }
 
 .console-card {
@@ -3313,7 +3558,20 @@ body, html {
   border-radius: 4px;
 }
 
-.console-row { display: flex; margin-bottom: 2px; font-size: 0.8rem; }
+/* 修改最后一个词条的样式 */
+.console-row:last-child {
+  margin-bottom: 0;
+  /* 确保最后一个词条有足够的底部间距 */
+  padding-bottom: 2px;
+}
+
+/* 调整词条的行高，避免文字被切割 */
+.console-row {
+  display: flex; 
+  margin-bottom: 4px; 
+  font-size: 0.8rem;
+  line-height: 1.5; /* 增加行高确保文字完整显示 */
+}
 .console-label { width: 85px; color: #555; flex-shrink: 0; }
 .gold-text { color: #f9e2af; font-weight: bold; }
 
@@ -4076,6 +4334,285 @@ body, html {
   0% { box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.7); }
   70% { box-shadow: 0 0 0 15px rgba(46, 204, 113, 0); }
   100% { box-shadow: 0 0 0 0 rgba(46, 204, 113, 0); }
+}
+
+/* 条目头部 */
+.item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+/* 保持 mini-info 原有布局，但让它占满剩余空间 */
+.mini-info {
+  display: flex;
+  justify-content: space-between;
+  flex: 1;
+  margin-right: 8px;
+}
+
+/* 品种名称保持原样 */
+.m-name {
+  color: #fff;
+  font-size: 13px;
+  font-weight: bold;
+}
+
+/* 时间样式调整 - 让它靠右 */
+.m-time {
+  color: #f1c40f;
+  font-size: 12px;
+  font-family: 'Consolas', monospace;
+  margin-left: 12px;
+}
+
+/* 删除按钮样式 */
+.delete-item-btn {
+  background: rgba(255, 71, 87, 0.1);
+  border: 1px solid rgba(255, 71, 87, 0.3);
+  color: #ff4757;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+  padding: 0;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.delete-item-btn:hover {
+  background: #ff4757;
+  color: white;
+  border-color: #ff4757;
+}
+
+/* 推送区域样式 */
+.push-section {
+  margin-top: 16px;
+  padding: 12px;
+  background: rgba(0, 122, 255, 0.05);
+  border: 1px solid rgba(0, 122, 255, 0.2);
+  border-radius: 8px;
+}
+
+.push-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.push-icon {
+  font-size: 16px;
+}
+
+.push-title {
+  font-size: 13px;
+  font-weight: bold;
+  color: #007aff;
+}
+
+/* 美化现有的 push-btn 按钮 - 绿色渐变版 */
+.push-btn {
+  width: 100%;
+  height: 42px;
+  background: linear-gradient(135deg, #b0ff57 0%, #0f4e2e 100%);
+  border: none;
+  border-radius: 10px;
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  margin: 10px 0 8px 0;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  letter-spacing: 0.5px;
+}
+
+
+/* 流光效果 */
+.push-btn::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  transition: left 0.5s ease;
+}
+
+.push-btn:hover::before {
+  left: 100%;
+}
+
+
+/* 点击效果 */
+.push-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 2px 10px rgba(46, 204, 113, 0.3);
+}
+
+/* 禁用状态 */
+.push-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: linear-gradient(135deg, #9ca3af 0%, #6b7280 100%);
+  box-shadow: none;
+}
+
+/* 按钮内的文字样式 */
+.push-btn span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.push-btn:hover span:first-child::before {
+  transform: scale(1.1);
+}
+
+/* 加载状态样式 */
+.push-btn:disabled span:last-child::before {
+  content: '';
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 6px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 现代下拉框样式 - 替换旧的 group-selector */
+.group-selector-modern {
+  margin-bottom: 16px;
+  width: 100%;
+}
+
+.select-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.modern-select {
+  width: 100%;
+  height: 44px;
+  padding: 0 16px;
+  padding-right: 40px; /* 为箭头留空间 */
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 10px;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 500;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  outline: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.modern-select:hover {
+  border-color: #007aff;
+  background: #252525;
+}
+
+.modern-select:focus {
+  border-color: #007aff;
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.1);
+}
+
+/* 自定义下拉箭头 */
+.select-arrow-modern {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #888;
+  font-size: 12px;
+  pointer-events: none;
+  transition: transform 0.2s ease;
+}
+
+.select-wrapper:hover .select-arrow-modern {
+  color: #007aff;
+  transform: translateY(-50%) rotate(180deg);
+}
+
+/* 下拉选项样式 */
+.modern-select option {
+  background: #1e1e1e;
+  color: #fff;
+  padding: 12px;
+  font-size: 14px;
+}
+
+/* 推送结果美化 */
+.push-result {
+  font-family: "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif !important;
+  padding: 12px 16px !important;
+  border-radius: 12px !important;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  text-align: center !important;
+  margin-top: 12px !important;
+  animation: resultPop 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1) !important;
+  backdrop-filter: blur(10px) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 8px !important;
+}
+
+/* 成功状态 */
+.push-result.success {
+  background: linear-gradient(135deg, #2ecc71 0%, #27ae60 100%) !important;
+  color: white !important;
+  border: none !important;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2) !important;
+}
+
+/* 失败状态 */
+.push-result.error {
+  background: linear-gradient(135deg, #ff4757 0%, #ee5a24 100%) !important;
+  color: white !important;
+  border: none !important;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2) !important;
+}
+
+/* 动画效果 */
+@keyframes resultPop {
+  0% {
+    opacity: 0;
+    transform: scale(0.8) translateY(-10px);
+  }
+  50% {
+    transform: scale(1.02) translateY(0);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
 
 /* PK 图标按钮样式 */
