@@ -26,6 +26,10 @@ import (
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+const (
+	PushPlusToken = "0eb7e91f47ea4238a09cf2a14e17ef78" // 你的 PushPlus token
+)
+
 // App struct
 type App struct {
 	ctx              context.Context
@@ -58,6 +62,12 @@ type App struct {
 	stopScanLoop      chan struct{}  // 停止扫菜巡逻的信号
 	isScanLoopRunning bool           // 扫菜巡逻是否正在执行
 
+	// --- 偷菜模块 ---
+	stealTargets      []Veggie     // 当前偷菜目标列表
+	stealIndex        int          // 当前尝试的目标索引
+	stealingMutex     sync.RWMutex // 偷菜状态锁
+	stealResponseChan chan bool    // 偷菜响应通道
+
 	// --- 菜园挂机任务控制 ---
 	gardenTask          GardenTaskConfig
 	gdMutex             sync.RWMutex
@@ -83,9 +93,11 @@ type App struct {
 	isPKActive     bool
 }
 
-// NewApp creates a new App application struct
+// 在 NewApp 中初始化
 func NewApp() *App {
-	return &App{}
+	return &App{
+		stealResponseChan: make(chan bool, 1),
+	}
 }
 
 // ------------------- 数据结构定义 -------------------
@@ -136,12 +148,15 @@ type VeggieInfo struct {
 	Offset int    `json:"offset"`
 }
 
+// Veggie 结构体修改
 type Veggie struct {
-	UID        string `json:"uid"`        // 目标玩家 UID 的 16 进制 (例如: "024FA5FA")
-	Name       string `json:"name"`       // 蔬菜名称 (例如: "变异南瓜")
-	VeggieType string `json:"veggieType"` // 蔬菜品种 ID (例如: "01CD")
-	MatureTime int64  `json:"matureTime"` // 💡 关键修改：成熟的 Unix 时间戳 (秒)
-	Pos        string `json:"pos"`        // 蔬菜在地里的位置特征码 (例如: "AABB")
+	UID        string `json:"uid"`        // 十六进制字符串
+	Name       string `json:"name"`       // 蔬菜名称
+	VeggieType string `json:"veggieType"` // 蔬菜品种 ID
+	MatureTime int64  `json:"matureTime"` // 成熟时间戳
+	Pos        string `json:"pos"`        // 坑位
+	District   string `json:"district"`   // 区服信息
+	Nickname   string `json:"nickname"`   // 🌟 新增：玩家昵称
 }
 
 type VeggieConfigData struct {
@@ -160,6 +175,7 @@ type GardenTaskConfig struct {
 	EatGuilds     bool   `json:"eatGuilds"`
 	EatRankings   bool   `json:"eatRankings"`
 	ShareEgg      bool   `json:"shareEgg"`
+	StealVeggie   bool   `json:"stealVeggie"`
 }
 
 type ScanTaskConfig struct {
@@ -648,6 +664,22 @@ func (a *App) initSunnyConfig() {
 					a.veggieMutex.Lock()
 					a.lastGardenHex = bodyHex // 把这一长条包存下来
 					a.veggieMutex.Unlock()
+				}
+
+				// --- 偷菜返回包识别 (67E80000) ---
+				if strings.Contains(bodyHex, "67E80000") {
+					// 检查是否包含偷菜失败标记
+					if strings.Contains(bodyHex, "C0C0C0C0") {
+						select {
+						case a.stealResponseChan <- false:
+						default:
+						}
+					} else {
+						select {
+						case a.stealResponseChan <- true:
+						default:
+						}
+					}
 				}
 
 				// --- 指定人员营地行返回包识别 (D1E50000) ---
@@ -1340,6 +1372,7 @@ func (a *App) parseNeighborList(hexData string) []NeighborInfo {
 		}
 
 		neighbor := parseSingleNeighbor(hexData, uidStart)
+
 		if neighbor.UID != "" {
 			neighbors = append(neighbors, neighbor)
 		}
@@ -1375,7 +1408,7 @@ func parseSingleNeighbor(hexData string, startPos int) NeighborInfo {
 
 	pattern := `06(01|02|03)07(01|02|03)`
 	re := regexp.MustCompile(pattern)
-	searchArea := hexData[searchStart:min(searchStart+100, len(hexData))]
+	searchArea := hexData[searchStart:min(searchStart+500, len(hexData))]
 	match := re.FindStringIndex(searchArea)
 
 	if match != nil {
@@ -1402,20 +1435,20 @@ func (a *App) findTargetMeats(neighbors []NeighborInfo) {
 
 	for _, neighbor := range neighbors {
 		// 检查肉的类型和状态（每种只发送一次）
-		if !smallMeatFound && neighbor.MeatType == "01" && neighbor.MeatStatus == "02" {
+		if !smallMeatFound && neighbor.MeatType == "01" && neighbor.MeatStatus == "02" && neighbor.pvp < 78 && neighbor.pvp > 66 {
 			smallMeatFound = true
 			cmdBytes, _ := hex.DecodeString("120000008417000000287A7F82410092CE" + neighbor.UID + "00")
 			a.activeConn.SendToServer(2, cmdBytes)
 			// fmt.Println("120000008417000000287A7F82410092CE" + neighbor.UID + "00")
 			// time.Sleep(1 * time.Second)
 
-		} else if !mediumMeatFound && neighbor.MeatType == "02" && neighbor.MeatStatus == "02" {
+		} else if !mediumMeatFound && neighbor.MeatType == "02" && neighbor.MeatStatus == "02" && neighbor.pvp < 78 && neighbor.pvp > 66 {
 			mediumMeatFound = true
 			cmdBytes, _ := hex.DecodeString("120000008417000000287A7F82410092CE" + neighbor.UID + "00")
 			a.activeConn.SendToServer(2, cmdBytes)
 			// time.Sleep(1 * time.Second)
 
-		} else if !largeMeatFound && neighbor.MeatType == "03" && neighbor.MeatStatus == "02" {
+		} else if !largeMeatFound && neighbor.MeatType == "03" && neighbor.MeatStatus == "02" && neighbor.pvp < 78 && neighbor.pvp > 66 {
 			largeMeatFound = true
 			cmdBytes, _ := hex.DecodeString("120000008417000000287A7F82410092CE" + neighbor.UID + "00")
 			a.activeConn.SendToServer(2, cmdBytes)
@@ -1510,61 +1543,68 @@ func (a *App) FindTargetVeggies(hexData string, selectedIds []string) []Veggie {
 }
 
 func (a *App) LoadRemoteGardenConfig() {
-	// 💡 建议在 URL 后面加个随机数，防止 GitHub CDN 缓存导致下到旧的 JSON
-	url := "https://raw.githubusercontent.com/dear510/cs-config/refs/heads/main/garden_veggie.json?t=" + strconv.FormatInt(time.Now().Unix(), 10)
-
-	client := http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
-
-	if err != nil {
-		fmt.Println("⚠️ 远程配置拉取失败:", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("⚠️ 远程文件返回错误状态码: %d\n", resp.StatusCode)
-		return
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	urls := []string{
+		"https://ghproxy.net/https://raw.githubusercontent.com/dear510/cs-config/main/garden_veggie.json?t=" + timestamp,
+		"https://raw.githubusercontent.com/dear510/cs-config/main/garden_veggie.json?t=" + timestamp,
 	}
 
-	// 1. 一次性读取全部内容
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Println("❌ 读取响应体失败:", err)
+	client := http.Client{Timeout: 8 * time.Second}
+	var body []byte
+
+	for _, url := range urls {
+		resp, err := client.Get(url)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			body, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if len(body) > 0 {
+				break
+			}
+		}
+	}
+
+	if len(body) == 0 {
+		fmt.Println("⚠️ 菜园远程配置拉取失败: 所有线路不可用")
 		return
 	}
 
-	// 2. 解析 JSON (此时 body 就在内存里，可以反复使用)
 	var tempConfig VeggieConfigData
 	if err := json.Unmarshal(body, &tempConfig); err != nil {
-		fmt.Println("❌ JSON解析失败!")
-		fmt.Println("报错内容:", err)
-		fmt.Println("接收到的原始数据:", string(body))
+		fmt.Println("❌ 菜园解析失败:", err)
 		return
 	}
 
-	// 3. 赋值给全局变量
 	a.gdMutex.Lock()
 	a.gardenData = tempConfig
 	a.gdMutex.Unlock()
-
-	// 4. 打印结果
-	fmt.Printf("✅ 菜园配置同步成功，当前品种数: %d\n", len(tempConfig.Veggies))
+	fmt.Printf("✅ 菜园配置同步成功，品种数: %d\n", len(tempConfig.Veggies))
 }
 
 func (a *App) LoadRemoteCommands() {
-	url := "https://raw.githubusercontent.com/dear510/cs-config/refs/heads/main/commands.json"
-
-	resp, err := http.Get(url)
-	if err != nil {
-		fmt.Println("❌ 无法获取远程指令集:", err)
-		return
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	urls := []string{
+		"https://ghproxy.net/https://raw.githubusercontent.com/dear510/cs-config/main/commands.json?t=" + timestamp,
+		"https://raw.githubusercontent.com/dear510/cs-config/main/commands.json",
 	}
-	defer resp.Body.Close()
 
+	client := http.Client{Timeout: 5 * time.Second}
 	var temp RemoteConfig
-	if err := json.NewDecoder(resp.Body).Decode(&temp); err != nil {
-		fmt.Println("❌ 解析远程指令失败:", err)
+	success := false
+
+	for _, url := range urls {
+		resp, err := client.Get(url)
+		if err == nil && resp.StatusCode == 200 {
+			if err := json.NewDecoder(resp.Body).Decode(&temp); err == nil {
+				resp.Body.Close()
+				success = true
+				break
+			}
+			resp.Body.Close()
+		}
+	}
+
+	if !success {
+		fmt.Println("❌ 无法获取远程指令集: 线路全挂")
 		return
 	}
 
@@ -1590,20 +1630,33 @@ func (a *App) GetRemoteConfig() RemoteConfig {
 
 // GetRemoteTargets 获取云端配置玩家名单
 func (a *App) GetRemoteTargets() (*TargetsConfig, error) {
-	url := "https://raw.githubusercontent.com/dear510/cs-config/refs/heads/main/targets.json"
+	// 增加国内加速前缀
+	urls := []string{
+		"https://ghproxy.net/https://raw.githubusercontent.com/dear510/cs-config/main/targets.json?t=" + strconv.FormatInt(time.Now().Unix(), 10),
+		"https://raw.githubusercontent.com/dear510/cs-config/main/targets.json",
+	}
 
+	var lastErr error
 	client := http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
 
-	var config TargetsConfig
-	if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
-		return nil, err
+	for _, url := range urls {
+		resp, err := client.Get(url)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == 200 {
+			var config TargetsConfig
+			if err := json.NewDecoder(resp.Body).Decode(&config); err == nil {
+				return &config, nil
+			} else {
+				lastErr = err
+			}
+		}
 	}
-	return &config, nil
+	return nil, fmt.Errorf("拉取名单失败: %v", lastErr)
 }
 
 func (a *App) processGardenActionsSync(hexData string) {
@@ -1698,7 +1751,7 @@ func (a *App) processGardenActionsSync(hexData string) {
 			})
 			if isGoldenTree {
 				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": fmt.Sprintf("🌳 %s 已成熟，准备开始 50 次灌注...", info.Name, pos),
+					"message": fmt.Sprintf("🌳 %s 已成熟，准备开始 50 次灌注...", info.Name),
 					"type":    "default",
 				})
 
@@ -1831,7 +1884,7 @@ func (a *App) ToggleGardenLoop(enable bool, config map[string]interface{}) {
 		// 检查是否有任何子任务被选中
 		hasAnyTask := a.gardenTask.CollectMeat || a.gardenTask.EatMeat ||
 			a.gardenTask.CollectVeggie || a.gardenTask.PlantVeggie ||
-			a.gardenTask.ShareEgg
+			a.gardenTask.ShareEgg || a.gardenTask.StealVeggie
 
 		if !hasAnyTask {
 			a.gdMutex.Unlock()
@@ -1883,7 +1936,7 @@ func (a *App) ToggleGardenLoop(enable bool, config map[string]interface{}) {
 				}
 
 				// 检查菜类任务（只有被勾选时才调用）
-				if taskStruct.CollectVeggie || taskStruct.PlantVeggie {
+				if taskStruct.CollectVeggie || taskStruct.PlantVeggie || taskStruct.StealVeggie {
 					select {
 					case <-a.stopGardenLoop:
 						return
@@ -1906,7 +1959,7 @@ func (a *App) ToggleGardenLoop(enable bool, config map[string]interface{}) {
 				a.gdMutex.RLock()
 				stillHasTask := a.gardenTask.CollectMeat || a.gardenTask.EatMeat ||
 					a.gardenTask.CollectVeggie || a.gardenTask.PlantVeggie ||
-					a.gardenTask.ShareEgg
+					a.gardenTask.ShareEgg || a.gardenTask.StealVeggie
 				a.gdMutex.RUnlock()
 
 				if !stillHasTask {
@@ -1959,6 +2012,7 @@ func mapToInterface(task GardenTaskConfig) map[string]interface{} {
 	result["buySeeds"] = task.BuySeeds
 	result["veggieType"] = task.VeggieType
 	result["shareEgg"] = task.ShareEgg
+	result["stealVeggie"] = task.StealVeggie
 	return result
 }
 
@@ -2134,6 +2188,7 @@ func (a *App) ExecuteDailyTasks(tasks []TaskParam) {
 				"message": fmt.Sprintf("✅ [%d/%d] %s 执行完成", index+1, len(tasks), a.getTaskName(task.ID)),
 				"type":    "success",
 			})
+			time.Sleep(time.Duration(900+rand.Intn(201)) * time.Millisecond)
 		}
 
 		// 所有任务执行完毕
@@ -2603,7 +2658,7 @@ func (a *App) runRewardTask(config map[string]interface{}) {
 		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]string{"message": "🔍 正在领取寻宝任务奖励...", "type": "default"})
 		packet, _ := hex.DecodeString("110000001E14000000B0CE288F410091CE030B53D1110000001E14000000B0CE288F410091CE030B53D2110000001E14000000B0CE288F410091CE030B53D3110000001E14000000B0CE288F410091CE030B53D4")
 		a.activeConn.SendToServer(2, packet)
-		time.Sleep(time.Duration(300+rand.Intn(201)) * time.Millisecond)
+		time.Sleep(time.Duration(1000+rand.Intn(201)) * time.Millisecond)
 	}
 
 	// 5. 天空之城任务
@@ -2619,7 +2674,7 @@ func (a *App) runRewardTask(config map[string]interface{}) {
 		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]string{"message": "⏳ 正在领取回溯任务奖励...", "type": "default"})
 		packet, _ := hex.DecodeString("110000001E14000000307A2F12410091CE030B4819110000001E14000000307A2F12410091CE030B481A110000001E14000000307A2F12410091CE030B481B110000001E14000000307A2F12410091CE030B481C")
 		a.activeConn.SendToServer(2, packet)
-		time.Sleep(time.Duration(300+rand.Intn(201)) * time.Millisecond)
+		time.Sleep(time.Duration(1000+rand.Intn(201)) * time.Millisecond)
 	}
 
 	// 7. 珍宝藏宝图
@@ -2753,20 +2808,6 @@ func (a *App) runMeatTask(config map[string]interface{}) {
 		})
 		return
 	}
-
-	// 🌟 关键修复：移除自动挂机模式检查，让一次性任务也能执行
-	// 注释掉或删除以下代码块
-	/*
-	   // 检查是否在自动挂机模式下
-	   a.gdMutex.RLock()
-	   isAutoMode := a.isGardenLoopRunning
-	   a.gdMutex.RUnlock()
-
-	   if !isAutoMode {
-	       fmt.Println("⏸️ 不在自动挂机模式，跳过肉类任务")
-	       return
-	   }
-	*/
 
 	// 打印当前任务状态（调试用）
 	fmt.Printf("🥩 执行肉类任务: collectMeat=%v, eatMeat=%v, neighbors=%v, guilds=%v, rankings=%v\n",
@@ -3074,6 +3115,244 @@ func (a *App) runVeggieTask(config map[string]interface{}) {
 		// 扫描结束，多等几秒让最后一个包返回，再关闭解析开关
 		time.Sleep(5 * time.Second)
 		a.isScanningVeggie = false
+	}
+
+	// --- 第四阶段：偷菜挂机逻辑 ---
+	if active, ok := config["stealVeggie"].(bool); ok && active {
+		fmt.Println("==========================================")
+		fmt.Println("🚀 [偷菜] 开始执行偷菜挂机逻辑")
+		fmt.Printf("📊 [偷菜] 配置参数: stealVeggie=%v\n", active)
+
+		// 检查是否在自动挂机模式下
+		if !a.isGardenLoopRunning {
+			fmt.Println("❌ [偷菜] 自动挂机未运行，偷菜功能退出")
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": "⚠️ 偷菜功能仅在自动挂机中生效",
+				"type":    "warning",
+			})
+			return
+		}
+		fmt.Println("✅ [偷菜] 自动挂机模式检测通过")
+
+		// 检查是否有扫菜情报
+		fmt.Println("🔍 [偷菜] 正在检查扫菜情报...")
+		a.stealingMutex.RLock()
+		targets := a.stealTargets
+		targetCount := len(targets)
+		a.stealingMutex.RUnlock()
+
+		fmt.Printf("📊 [偷菜] 扫菜情报数量: %d\n", targetCount)
+
+		if targetCount == 0 {
+			fmt.Println("❌ [偷菜] 扫菜情报为空，退出偷菜")
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": "🌱 偷菜失败：当前扫菜情报为空，请先执行扫菜",
+				"type":    "warning",
+			})
+			return
+		}
+		fmt.Println("✅ [偷菜] 扫菜情报检测通过")
+
+		// 1. 检查自己是否在偷菜状态
+		fmt.Println("🔍 [偷菜] 准备检查偷菜状态，清空 lastGardenHex...")
+		a.veggieMutex.Lock()
+		a.lastGardenHex = "" // 清空旧包
+		fmt.Println("✅ [偷菜] lastGardenHex 已清空")
+		a.veggieMutex.Unlock()
+
+		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+			"message": "🌱 正在检查偷菜状态...",
+			"type":    "default",
+		})
+
+		// 发送访问营地指令
+		fmt.Println("📤 [偷菜] 发送访问营地指令: 0C0000002D1A000000401B398F410090")
+		Packet := "0C0000002D1A000000401B398F410090"
+		p, err := hex.DecodeString(Packet)
+		if err != nil {
+			fmt.Printf("❌ [偷菜] 指令解析失败: %v\n", err)
+			return
+		}
+		fmt.Printf("✅ [偷菜] 指令解析成功，长度: %d 字节\n", len(p))
+
+		a.activeConn.SendToServer(2, p)
+		fmt.Println("📤 [偷菜] 营地访问指令已发送，等待响应...")
+
+		// 轮询等待返回包 (最多等 4 秒)
+		fmt.Println("⏳ [偷菜] 开始轮询等待返回包，最多等待4秒...")
+		var targetHex string
+		for i := 0; i < 40; i++ {
+			a.veggieMutex.Lock()
+			if a.lastGardenHex != "" {
+				targetHex = a.lastGardenHex
+				hexLen := len(targetHex)
+				a.veggieMutex.Unlock()
+				fmt.Printf("✅ [偷菜] 第 %d 次轮询成功，收到返回包，长度: %d 字符\n", i+1, hexLen)
+				break
+			}
+			a.veggieMutex.Unlock()
+			time.Sleep(100 * time.Millisecond)
+			if (i+1)%10 == 0 {
+				fmt.Printf("⏳ [偷菜] 已等待 %dms...\n", (i+1)*100)
+			}
+		}
+
+		if targetHex == "" {
+			fmt.Println("❌ [偷菜] 等待超时，未收到营地返回包")
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": "🌱 偷菜状态检查超时",
+				"type":    "warning",
+			})
+			return
+		}
+		fmt.Printf("✅ [偷菜] 成功收到营地返回包，长度: %d 字符\n", len(targetHex))
+
+		// 检查是否在偷菜状态：查找 06CF{16}07CE{8} 模式
+		fmt.Println("🔍 [偷菜] 检查是否在偷菜状态（查找模式: 06CF{16}07CE{8}）")
+		re := regexp.MustCompile(`06CF([0-9A-F]{16})07CE([0-9A-F]{8})`)
+		isStealing := re.MatchString(targetHex)
+
+		if isStealing {
+			fmt.Println("✅ [偷菜] 检测到偷菜冷却状态，本次轮回跳过")
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": "🌱 当前正在偷菜冷却中，跳过本次轮回",
+				"type":    "info",
+			})
+			return
+		}
+		fmt.Println("✅ [偷菜] 当前不在偷菜状态，可以执行偷菜")
+
+		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+			"message": "🌱 当前可偷菜，开始执行偷菜任务",
+			"type":    "info",
+		})
+
+		// 2. 开始偷菜循环
+		now := time.Now().UnixMilli()
+		fmt.Printf("📊 [偷菜] 当前时间戳: %d\n", now)
+		fmt.Printf("📊 [偷菜] 目标列表总数: %d\n", len(targets))
+
+		// 获取当前索引
+		a.stealingMutex.Lock()
+		startIndex := a.stealIndex
+		fmt.Printf("📊 [偷菜] 当前偷菜索引: %d\n", startIndex)
+		a.stealingMutex.Unlock()
+
+		for i := 0; i < len(targets); i++ {
+			idx := (startIndex + i) % len(targets)
+			target := targets[idx]
+
+			fmt.Printf("\n--- [偷菜] 尝试目标 %d/%d (索引: %d) ---\n", i+1, len(targets), idx)
+			fmt.Printf("📋 [偷菜] 目标详情: UID=%s, 昵称=%s, 作物=%s, 坑位=%s, 成熟时间=%d\n",
+				target.UID, target.Nickname, target.Name, target.Pos, target.MatureTime)
+
+			// 检查是否成熟
+			if target.MatureTime > now {
+				timeLeft := (target.MatureTime - now) / 1000
+				fmt.Printf("⏳ [偷菜] 目标还未成熟，还需 %d 秒，跳过\n", timeLeft)
+				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+					"message": fmt.Sprintf("🌱 目标 [%s] 还未成熟，跳过",
+						target.Name),
+					"type": "info",
+				})
+				continue
+			}
+			fmt.Println("✅ [偷菜] 目标已成熟")
+
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": fmt.Sprintf("🌱 尝试偷取 %s 的 %s (坑位: %s)",
+					target.Nickname, target.Name, target.Pos),
+				"type": "info",
+			})
+
+			// 构建偷菜指令
+			uidHex := fmt.Sprintf("%08X", target.UID)
+			stealPacket := fmt.Sprintf("14000000991700000072534F82410092CD%sCE%s",
+				target.Pos, uidHex)
+
+			fmt.Printf("🔨 [偷菜] 构建偷菜指令: %s\n", stealPacket)
+			fmt.Printf("🔨 [偷菜] 指令详情: 坑位=%s, UID十六进制=%s\n", target.Pos, uidHex)
+
+			stealBytes, err := hex.DecodeString(stealPacket)
+			if err != nil {
+				fmt.Printf("❌ [偷菜] 偷菜指令解析失败: %v\n", err)
+				continue
+			}
+			fmt.Printf("✅ [偷菜] 指令解析成功，长度: %d 字节\n", len(stealBytes))
+
+			fmt.Println("📤 [偷菜] 发送偷菜指令...")
+			a.activeConn.SendToServer(2, stealBytes)
+			fmt.Println("✅ [偷菜] 偷菜指令已发送")
+
+			// 等待返回包（最多等3秒）
+			fmt.Println("⏳ [偷菜] 等待服务器响应，500ms基础延迟...")
+			time.Sleep(500 * time.Millisecond)
+
+			fmt.Println("⏳ [偷菜] 开始等待偷菜结果（最多3秒）...")
+			stealSuccess := a.waitForStealResponse(3 * time.Second)
+
+			if !stealSuccess {
+				fmt.Println("❌ [偷菜] 偷菜失败（服务器返回失败或超时）")
+				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+					"message": fmt.Sprintf("🌱 偷菜失败（可能已被偷），移除目标并尝试下一个"),
+					"type":    "warning",
+				})
+
+				// 从目标列表中移除当前目标
+				fmt.Printf("📝 [偷菜] 从目标列表中移除索引 %d\n", idx)
+				a.stealingMutex.Lock()
+				oldCount := len(a.stealTargets)
+				a.stealTargets = append(a.stealTargets[:idx], a.stealTargets[idx+1:]...)
+				newCount := len(a.stealTargets)
+				fmt.Printf("📊 [偷菜] 目标列表: %d -> %d\n", oldCount, newCount)
+
+				if newCount > 0 {
+					a.stealIndex = idx % newCount
+					fmt.Printf("📊 [偷菜] 更新偷菜索引为: %d\n", a.stealIndex)
+				} else {
+					a.stealIndex = 0
+					fmt.Println("📊 [偷菜] 目标列表为空，重置索引为0")
+				}
+				a.stealingMutex.Unlock()
+
+				continue
+			}
+
+			// 偷菜成功
+			fmt.Printf("🎉 [偷菜] 偷菜成功！成功偷取 %s 的 %s\n", target.Nickname, target.Name)
+			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+				"message": fmt.Sprintf("✅ 成功偷取 %s 的 %s！", target.Nickname, target.Name),
+				"type":    "success",
+			})
+
+			// 从目标列表中移除已偷成功的
+			fmt.Printf("📝 [偷菜] 从目标列表中移除已偷成功的索引 %d\n", idx)
+			a.stealingMutex.Lock()
+			oldCount := len(a.stealTargets)
+			a.stealTargets = append(a.stealTargets[:idx], a.stealTargets[idx+1:]...)
+			newCount := len(a.stealTargets)
+			fmt.Printf("📊 [偷菜] 目标列表: %d -> %d\n", oldCount, newCount)
+
+			if newCount > 0 {
+				a.stealIndex = idx % newCount
+				fmt.Printf("📊 [偷菜] 更新偷菜索引为: %d\n", a.stealIndex)
+			} else {
+				a.stealIndex = 0
+				fmt.Println("📊 [偷菜] 目标列表为空，重置索引为0")
+			}
+			a.stealingMutex.Unlock()
+
+			fmt.Println("✅ [偷菜] 本次偷菜轮回完成，等待下个轮回")
+			// 偷成功就退出，等下一个轮回
+			return
+		}
+
+		fmt.Println("📝 [偷菜] 所有目标尝试完毕，等待下个轮回")
+		wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+			"message": "🌱 本轮所有目标都已尝试完毕，等待下个轮回",
+			"type":    "info",
+		})
+		fmt.Println("==========================================")
 	}
 }
 
@@ -3706,6 +3985,158 @@ func (a *App) runGambleTask(config map[string]interface{}) {
 	time.Sleep(time.Duration(200+rand.Intn(201)) * time.Millisecond)
 }
 
+// 偷菜相关辅助function
+func (a *App) waitForStealResponse(timeout time.Duration) bool {
+	select {
+	case success := <-a.stealResponseChan:
+		return success
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// UpdateStealTargets 更新偷菜目标列表
+func (a *App) UpdateStealTargets(targets []Veggie) {
+	a.stealingMutex.Lock()
+	defer a.stealingMutex.Unlock()
+
+	// 过滤掉已经成熟时间过去的菜
+	now := time.Now().UnixMilli()
+	validTargets := []Veggie{}
+	for _, t := range targets {
+		if t.MatureTime > now {
+			validTargets = append(validTargets, t)
+		}
+	}
+
+	a.stealTargets = validTargets
+	a.stealIndex = 0 // 重置索引
+
+	fmt.Printf("🌱 偷菜目标已更新：%d 个待偷\n", len(validTargets))
+}
+
+// PushVeggieResultsToWeChat 推送扫菜结果到微信
+func (a *App) PushVeggieResultsToWeChat(veggies []Veggie, group string) (map[string]interface{}, error) {
+	result := make(map[string]interface{})
+
+	if len(veggies) == 0 {
+		result["success"] = false
+		result["message"] = "没有可推送的数据"
+		result["count"] = 0
+		return result, nil
+	}
+
+	// 构建推送内容
+	var content strings.Builder
+	content.WriteString(fmt.Sprintf("🔍 扫菜情报 (%d 条)\n\n", len(veggies)))
+	content.WriteString("━━━━━━━━━━━━━━━━\n\n")
+
+	for i, v := range veggies {
+		// 🌟 核心修改：直接将 UID 字符串转换为十进制数字
+		var uidDecimal int64
+
+		// v.UID 是十六进制字符串（如 "024FA5FA"）
+		// 先尝试直接解析为十进制（如果本身就是十进制字符串）
+		if val, err := strconv.ParseInt(v.UID, 10, 64); err == nil {
+			uidDecimal = val
+		} else {
+			// 如果不是十进制，按十六进制解析
+			uidDecimal, _ = strconv.ParseInt(v.UID, 16, 64)
+		}
+
+		// 转换时间为可读格式
+		matureTime := time.UnixMilli(v.MatureTime).In(time.FixedZone("CST", 8*3600))
+		timeStr := matureTime.Format("15:04:05")
+
+		// 计算剩余时间
+		now := time.Now().In(time.FixedZone("CST", 8*3600))
+		remaining := v.MatureTime/1000 - now.Unix()
+
+		var remainingStr string
+		if remaining <= 0 {
+			remainingStr = "已成熟"
+		} else if remaining < 60 {
+			remainingStr = fmt.Sprintf("%d秒", remaining)
+		} else if remaining < 3600 {
+			remainingStr = fmt.Sprintf("%d分钟", remaining/60)
+		} else {
+			remainingStr = fmt.Sprintf("%d小时%d分钟", remaining/3600, (remaining%3600)/60)
+		}
+
+		// 获取昵称
+		nickname := v.Nickname
+		if nickname == "" {
+			nickname = fmt.Sprintf("用户%d", uidDecimal)
+		}
+
+		content.WriteString(fmt.Sprintf("%d. %s\n", i+1, v.Name))
+		content.WriteString(fmt.Sprintf("   👤 %s\n", nickname))
+		content.WriteString(fmt.Sprintf("   🆔 %d\n", uidDecimal)) // 🌟 这里显示十进制
+		content.WriteString(fmt.Sprintf("   ⏰ 成熟: %s (%s)\n", timeStr, remainingStr))
+		content.WriteString("\n")
+	}
+
+	// 添加时间戳
+	content.WriteString("━━━━━━━━━━━━━━━━\n")
+	content.WriteString(fmt.Sprintf("📅 推送时间: %s\n",
+		time.Now().In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05")))
+
+	// 调用 PushPlus API
+	pushURL := "http://www.pushplus.plus/send"
+
+	payload := map[string]interface{}{
+		"token":    PushPlusToken,
+		"title":    fmt.Sprintf("次神助手 - 扫菜情报 (%d条)", len(veggies)),
+		"content":  content.String(),
+		"topic":    group,
+		"template": "txt",
+	}
+
+	jsonData, _ := json.Marshal(payload)
+
+	fmt.Printf("📤 正在推送到群组: %s (%d条)\n", group, len(veggies))
+
+	resp, err := http.Post(pushURL, "application/json", strings.NewReader(string(jsonData)))
+	if err != nil {
+		result["success"] = false
+		result["message"] = fmt.Sprintf("网络请求失败: %v", err)
+		result["count"] = 0
+		return result, err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	// 解析响应
+	var pushResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data string `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &pushResp); err != nil {
+		result["success"] = false
+		result["message"] = fmt.Sprintf("解析响应失败: %v", err)
+		result["count"] = 0
+		return result, err
+	}
+
+	if pushResp.Code == 200 {
+		result["success"] = true
+		result["message"] = "推送成功"
+		result["count"] = len(veggies)
+		result["group"] = group
+
+		fmt.Printf("✅ 群组 %s 推送成功: %d 条\n", group, len(veggies))
+	} else {
+		result["success"] = false
+		result["message"] = fmt.Sprintf("推送失败: %s", pushResp.Msg)
+		result["count"] = 0
+	}
+
+	return result, nil
+}
+
 // 辅助方法：向前端推送进度日志
 func (a *App) emitTaskProgress(msg string, msgType string, finished bool) {
 	wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
@@ -3948,67 +4379,101 @@ func (a *App) GetHashedMachineID() string {
 	return a.hashMachineID(rawID)
 }
 
-// 修改验证逻辑，使用MD5加密后的机器码
+// CheckAuthOnline 验证逻辑：支持多线路轮询和MD5加密匹配
 func (a *App) CheckAuthOnline(rawMachineID string) (bool, string, int) {
-	// 对原始机器码进行MD5加密
-	hashedID := a.hashMachineID(rawMachineID)
+	// 1. 对原始机器码进行MD5加密（确保本地计算结果为小写以便比对）
+	hashedID := strings.ToLower(a.hashMachineID(rawMachineID))
 	fmt.Printf("🔍 正在验证设备MD5: [%s]\n", hashedID)
 
-	const authUrl = "https://gist.githubusercontent.com/dear510/e24f215a3f5534e5dc5971f7038643c6/raw/auth.txt"
+	// 2. 定义验证线路（优先级：国内代理1 -> 国内代理2 -> GitHub直连）
+	// 注意：使用 /raw/auth.txt 结尾的链接可以确保每次拿到的都是 Gist 的最新版本
+	urls := []string{
+		"https://ghproxy.net/https://gist.githubusercontent.com/dear510/e24f215a3f5534e5dc5971f7038643c6/raw/auth.txt",
+		"https://mirror.ghproxy.com/https://gist.githubusercontent.com/dear510/e24f215a3f5534e5dc5971f7038643c6/raw/auth.txt",
+		"https://gist.githubusercontent.com/dear510/e24f215a3f5534e5dc5971f7038643c6/raw/auth.txt",
+	}
 
-	client := http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(authUrl)
-	if err != nil {
+	var body []byte
+	var err error
+	client := http.Client{
+		Timeout: 7 * time.Second, // 考虑到国内网络波动，超时设为7秒
+	}
+
+	// 3. 轮询尝试线路
+	for _, url := range urls {
+		fmt.Printf("🌐 尝试连接线路: %s\n", url)
+		resp, e := client.Get(url)
+		if e == nil && resp.StatusCode == 200 {
+			body, err = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err == nil && len(body) > 0 {
+				fmt.Println("✅ 网络请求成功")
+				break
+			}
+		}
+		if e != nil {
+			fmt.Printf("⚠️ 线路异常: %v\n", e)
+		} else if resp != nil {
+			fmt.Printf("⚠️ 线路返回状态码: %d\n", resp.StatusCode)
+			resp.Body.Close()
+		}
+	}
+
+	if len(body) == 0 {
+		fmt.Println("❌ 所有验证线路均不可用，请检查网络设置或关闭VPN")
 		return false, "NET_ERROR", 0
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	// 4. 解析云端数据
 	lines := strings.Split(string(body), "\n")
-
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		// 跳过注释行
-		if strings.HasPrefix(line, "#") {
+		// 跳过空行和注释行
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
+		// 格式约定为: MD5哈希值:有效期(YYYY-MM-DD):等级(可选)
 		parts := strings.Split(line, ":")
 		if len(parts) < 2 {
 			continue
 		}
 
-		cloudHash := parts[0] // MD5哈希值
-		expireStr := parts[1] // 有效期
-		level := 1            // 默认等级1
+		cloudHash := strings.ToLower(strings.TrimSpace(parts[0]))
+		expireStr := strings.TrimSpace(parts[1])
+		level := 1 // 默认等级1
 
+		// 如果提供了等级参数
 		if len(parts) >= 3 {
-			if l, err := strconv.Atoi(parts[2]); err == nil {
+			if l, err := strconv.Atoi(strings.TrimSpace(parts[2])); err == nil {
 				level = l
 			}
 		}
 
-		// 比对MD5哈希值
+		// 5. 比对MD5哈希值
 		if hashedID == cloudHash {
 			// 验证日期
 			expireDate, err := time.Parse("2006-01-02", expireStr)
 			if err != nil {
-				fmt.Printf("日期解析错误: %v\n", err)
+				fmt.Printf("❌ 日期格式配置错误: %s\n", expireStr)
 				return false, "DATE_ERROR", 0
 			}
 
-			if time.Now().After(expireDate) {
-				fmt.Printf("❌ 授权已过期: %s\n", expireStr)
+			// 检查是否过期
+			// 注意：为了对用户友好，通常包含过期当天，所以判断 Now 是否在 expireDate 之后
+			// 如果想更精确，可以加 24 小时偏移
+			if time.Now().After(expireDate.AddDate(0, 0, 1)) {
+				fmt.Printf("❌ 授权已过期，过期时间: %s\n", expireStr)
 				return false, "EXPIRED", 0
 			}
 
-			fmt.Printf("✅ 授权通过，等级: %d，有效期至: %s\n", level, expireStr)
-			a.UserLevel = level
+			fmt.Printf("✨ 验证通过! 等级: %d, 有效期至: %s\n", level, expireStr)
+			a.UserLevel = level // 更新内存中的用户等级
 			return true, expireStr, level
 		}
 	}
 
-	fmt.Printf("❌ 未找到匹配的机器码MD5: %s\n", hashedID)
+	fmt.Printf("❌ 该设备未获得授权，请联系管理员。MD5: %s\n", hashedID)
 	return false, "NOT_FOUND", 0
 }
 
