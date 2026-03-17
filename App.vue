@@ -5,7 +5,7 @@
         <span class="logo">🎮</span>
         <div class="brand-text">
           <h2>次神助手</h2>
-          <small>v2.6.1 </small>
+          <small>v2.7 </small>
         </div>
       </div>
 
@@ -1156,44 +1156,44 @@
     <div v-if="showUpdateModal" class="auth-overlay">
       <div class="auth-card" style="max-width: 480px;">
         <div class="auth-header">
-          <span class="auth-icon">⚙️</span>
-          <h3>v2.6 更新说明</h3>
+          <span class="auth-icon">🚀</span>
+          <h3>v2.7 重要版本更新</h3>
         </div>
         <div class="auth-body" style="text-align: left; max-height: 480px; overflow-y: auto; font-size: 13px; line-height: 1.6;">
           
           <div style="background: rgba(255, 149, 0, 0.1); border: 1px solid #ff9500; border-radius: 6px; padding: 10px; margin-bottom: 15px;">
             <p style="color: #ff9500; font-weight: bold; margin-bottom: 5px;">⚠️ 珍宝拦截重要提醒：</p>
-            <p style="color: #eee; margin: 0; font-size: 12px;">因拦截效率极高，启动前请务必确认生效规则。规则错误可能导致橙钻瞬间清空，请谨慎操作！</p>
+            <p style="color: #eee; margin: 0; font-size: 12px;">拦截效率维持巅峰，启动前请务必确认规则。操作失误可能导致橙钻瞬间清空，请谨慎开启！</p>
           </div>
 
-          <p style="color: #007aff; font-weight: bold; margin: 10px 0 5px 0;">【竞技板块 · 跨服切磋 (Beta)】</p>
+          <p style="color: #ff3b30; font-weight: bold; margin: 10px 0 5px 0;">【系统修复 · BUG FIX】</p>
           <ul style="list-style: none; padding-left: 5px; color: #ccc;">
-            <li>⚔️ <b>跨服切磋</b>：支持跨服挑战任意玩家。</li>
-            <li style="background: rgba(0, 122, 255, 0.1); padding: 8px; border-radius: 4px; margin: 5px 0; font-size: 12px; border-left: 3px solid #007aff;">
-              <b>操作指南：</b><br>
-              1. 在模块中输入【目标玩家UID】及【所属区服】。<br>
-              2. 在好友列表中选定一位【源替换好友】。<br>
-              3. 启动任务后，点开好友列表点击该好友，即可定向切磋目标玩家。
-              4. 目前云端名单仅更新至1-2200区, 之后大区的id信息作者将尽快完善。
+            <li>✅ <b>交互优化</b>：修复珍宝模块“目标属性”下拉框点击无法收回的体验问题。</li>
+            <li>✅ <b>日常增强</b>：修复【自动吃肉】偶尔识别不到空闲肉的逻辑缺陷，现在更精准。</li>
+          </ul>
+
+          <p style="color: #34c759; font-weight: bold; margin: 15px 0 5px 0;">【重磅更新 · 自动化升级】</p>
+          <ul style="list-style: none; padding-left: 5px; color: #ccc;">
+            <li>📢 <b>本区扫菜微信推送</b>：实时情报支持微信触达！</li>
+            <li style="font-size: 12px; color: #999; margin-bottom: 8px;">* 请联系各工会管理扫描二维码加入通知群组获取推送。</li>
+            
+            <li>🌱 <b>全自动偷菜 (1.0版)</b>：</li>
+            <li style="background: rgba(52, 199, 89, 0.1); padding: 8px; border-radius: 4px; margin: 5px 0; font-size: 12px; border-left: 3px solid #34c759;">
+              <b>运行说明：</b><br>
+              1. <b>扫菜</b>：仍维持【单次执行】，不支持挂机。<br>
+              2. <b>偷菜</b>：必须配合【自动挂机】功能使用（不支持单次执行）。<br>
+              3. <b>反馈</b>：初版挂机逻辑可能存在不完善之处，遇Bug或者扫菜名单缺漏请及时联系作者。目前挂机循环时间为5分钟/循环。
             </li>
           </ul>
 
-          <p style="color: #34c759; font-weight: bold; margin: 15px 0 5px 0;">【情报模块 · 全服扫菜】</p>
+          <p style="color: #af52de; font-weight: bold; margin: 15px 0 5px 0;">【未来规划 · NEXT】</p>
           <ul style="list-style: none; padding-left: 5px; color: #ccc;">
-            <li>🔍 <b>精准定位</b>：支持自定义区服名单及目标菜品进行全量扫描。</li>
-            <li>🌱 <b>实时展示</b>：扫描结果将实时汇总于右下角【嫩芽】图标，支持一键复制。</li>
-            <li style="color: #ff3b30; font-size: 12px; margin-top: 5px;">
-              <b>⚠️ 风控提醒：</b> 目前仅支持【单次执行】，不支持自动挂机。建议扫描间隔 <b>10分钟以上</b>，严禁高频访问以防触发次神检测警告。
-            </li>
-          </ul>
-
-          <p style="color: #af52de; font-weight: bold; margin: 15px 0 5px 0;">【未来规划】</p>
-          <ul style="list-style: none; padding-left: 5px; color: #ccc;">
-            <li>🍎 <b>全自动偷菜</b>：功能开发中，敬请期待...</li>
+            <li>⛏️ <b>矿区制霸</b>：矿战自动复活、精准锁定目标功能。</li>
+            <li>🖥️ <b>多开支持</b>：支持多账号同时在线自动化。</li>
           </ul>
 
         </div>
-        <button class="primary-btn" @click="showUpdateModal = false" style="margin-top: 20px; width: 100%;">确认进入助手</button>
+        <button class="primary-btn" @click="showUpdateModal = false" style="margin-top: 20px; width: 100%;">确认进入 v2.7 系统</button>
       </div>
     </div>
 
@@ -2253,6 +2253,26 @@ onMounted(async () => {
 
       // 7. 自动同步偷菜目标到后端
       syncStealTargetsToBackend();
+    });
+
+    // 监听偷菜目标移除事件
+    window.runtime.EventsOn("steal_target_removed", (data) => {
+        console.log("🗑️ 收到后端偷菜目标移除通知:", data);
+        
+        // 从前端列表中移除对应的目标
+        const index = scanResults.value.findIndex(
+            item => item.uid === data.uid && item.pos === data.pos
+        );
+        
+        if (index !== -1) {
+            scanResults.value.splice(index, 1);
+            console.log(`✅ 前端已同步移除目标: ${data.uid} - ${data.pos}`);
+            
+            // 可选：显示一个提示
+            // 你可以在这里添加一个轻提示
+        } else {
+            console.log(`⚠️ 未找到要移除的目标: ${data.uid} - ${data.pos}`);
+        }
     });
 
     // --- 原有监听逻辑 ---
