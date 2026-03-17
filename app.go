@@ -668,16 +668,28 @@ func (a *App) initSunnyConfig() {
 
 				// --- 偷菜返回包识别 (67E80000) ---
 				if strings.Contains(bodyHex, "67E80000") {
-					// 检查是否包含偷菜失败标记
-					if strings.Contains(bodyHex, "C0C0C0C0") {
-						select {
-						case a.stealResponseChan <- false:
-						default:
+					// 找到 67E80000 的位置
+					pos := strings.Index(bodyHex, "67E80000")
+					if pos != -1 {
+						// 检查这个位置之后是否有 C0C0C0C0
+						endPos := pos + 100 // 检查后面100个字符
+						if endPos > len(bodyHex) {
+							endPos = len(bodyHex)
 						}
-					} else {
-						select {
-						case a.stealResponseChan <- true:
-						default:
+						packetSegment := bodyHex[pos:endPos]
+
+						if strings.Contains(packetSegment, "C0C0C0C0") {
+							select {
+							case a.stealResponseChan <- false:
+							default:
+							}
+							fmt.Println("❌ [偷菜] 收到失败响应 (C0C0C0C0)")
+						} else {
+							select {
+							case a.stealResponseChan <- true:
+							default:
+							}
+							fmt.Println("✅ [偷菜] 收到成功响应")
 						}
 					}
 				}
@@ -3033,15 +3045,14 @@ func (a *App) runVeggieTask(config map[string]interface{}) {
 	if active, ok := config["scanVeggie"].(bool); ok && active {
 		// 1. 开启扫菜解析开关
 		a.isScanningVeggie = true
-		// 2. 解析 UID 列表 (处理 JSON 数字转 float64 的坑)
-		var targetUids []int64 // 直接存 int64 更稳妥
+
+		// 2. 解析 UID 列表
+		var targetUids []int64
 		if uids, ok := config["selectedUids"].([]interface{}); ok {
 			for _, u := range uids {
-				// 🌟 关键：JSON 数字在 map[string]interface{} 中默认是 float64
 				if val, ok := u.(float64); ok {
 					targetUids = append(targetUids, int64(val))
 				} else if valStr, ok := u.(string); ok {
-					// 兼容字符串格式
 					id, _ := strconv.ParseInt(valStr, 10, 64)
 					if id > 0 {
 						targetUids = append(targetUids, id)
@@ -3050,11 +3061,10 @@ func (a *App) runVeggieTask(config map[string]interface{}) {
 			}
 		}
 
-		// 2. 🌟 关键修复：解析感兴趣的蔬菜 ID 列表 (用于解析包)
+		// 3. 解析感兴趣的蔬菜 ID
 		var interestedVeggies []string
 		if ivs, ok := config["interestedVeggies"].([]interface{}); ok {
 			for _, v := range ivs {
-				// 蔬菜 ID 通常是字符串 (如 "01CD")，但也可能是数字
 				if valStr, ok := v.(string); ok {
 					interestedVeggies = append(interestedVeggies, valStr)
 				} else if valFloat, ok := v.(float64); ok {
@@ -3062,13 +3072,14 @@ func (a *App) runVeggieTask(config map[string]interface{}) {
 				}
 			}
 		}
-		// 3. 将解析出来的名单存入内存，供拦截器使用
+
+		// 4. 存入内存
 		a.scanMutex.Lock()
-		a.scanConfig.SelectedUids = []string{} // 清空旧的
+		a.scanConfig.SelectedUids = []string{}
 		for _, id := range targetUids {
 			a.scanConfig.SelectedUids = append(a.scanConfig.SelectedUids, fmt.Sprint(id))
 		}
-		a.scanConfig.InterestedVeggies = interestedVeggies // 存入正确断言后的名单
+		a.scanConfig.InterestedVeggies = interestedVeggies
 		a.scanMutex.Unlock()
 
 		fmt.Println("📍 待扫描 UID 列表 (十进制):", targetUids)
@@ -3080,40 +3091,26 @@ func (a *App) runVeggieTask(config map[string]interface{}) {
 				"type":    "default",
 			})
 
-			// 3. 依次发送访问指令
+			// 5. 依次发送访问指令（移除了 stopGardenLoop 检查）
 			for i, uidInt := range targetUids {
-				select {
-				case <-a.stopGardenLoop:
-					fmt.Println("🛑 扫菜巡逻被手动中止")
-					a.isScanningVeggie = false
-					return
-				default:
-					// 🌟 修正：现在 uidInt 已经是正确的 int64 了
-					// %08X 会将其转为 8 位大写的十六进制 (如 024FA5FA)
-					uidHex := fmt.Sprintf("%08X", uidInt)
-					packetHex := "110000002F1A00000009253F82410091CE" + uidHex
+				uidHex := fmt.Sprintf("%08X", uidInt)
+				packetHex := "110000002F1A00000009253F82410091CE" + uidHex
 
-					wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-						"message": fmt.Sprintf("📡 正在扫描(%d/%d): %d 的菜园", i+1, len(targetUids), uidInt),
-						"type":    "default",
-					})
+				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
+					"message": fmt.Sprintf("📡 正在扫描(%d/%d): %d 的菜园", i+1, len(targetUids), uidInt),
+					"type":    "default",
+				})
 
-					p, _ := hex.DecodeString(packetHex)
-					a.activeConn.SendToServer(2, p)
+				p, _ := hex.DecodeString(packetHex)
+				a.activeConn.SendToServer(2, p)
 
-					// 每条包间隔，你设置的 0.5s~0.9s
-					time.Sleep(1500 * time.Millisecond)
-				}
+				// 每条包间隔 1.5秒
+				time.Sleep(1500 * time.Millisecond)
 			}
-
-			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-				"message": "🏁 扫菜巡逻已全部完成",
-				"type":    "success",
-			})
 		}
 
-		// 扫描结束，多等几秒让最后一个包返回，再关闭解析开关
-		time.Sleep(5 * time.Second)
+		// 7. 扫描结束，关闭解析开关
+		time.Sleep(1 * time.Second) // 额外缓冲
 		a.isScanningVeggie = false
 	}
 
@@ -3230,43 +3227,91 @@ func (a *App) runVeggieTask(config map[string]interface{}) {
 		// 2. 开始偷菜循环
 		now := time.Now().UnixMilli()
 		fmt.Printf("📊 [偷菜] 当前时间戳: %d\n", now)
-		fmt.Printf("📊 [偷菜] 目标列表总数: %d\n", len(targets))
 
-		// 获取当前索引
-		a.stealingMutex.Lock()
-		startIndex := a.stealIndex
-		fmt.Printf("📊 [偷菜] 当前偷菜索引: %d\n", startIndex)
-		a.stealingMutex.Unlock()
+		// 🌟 关键修改：每次循环都重新获取最新列表
+		a.stealingMutex.RLock()
+		currentTargets := a.stealTargets
+		targetCount = len(currentTargets)
+		a.stealingMutex.RUnlock()
 
-		for i := 0; i < len(targets); i++ {
-			idx := (startIndex + i) % len(targets)
-			target := targets[idx]
+		fmt.Printf("📊 [偷菜] 当前目标列表总数: %d\n", targetCount)
 
-			fmt.Printf("\n--- [偷菜] 尝试目标 %d/%d (索引: %d) ---\n", i+1, len(targets), idx)
+		// 统计信息：计算当前有多少已成熟的目标
+		ripeCount := 0
+		for _, t := range currentTargets {
+			if t.MatureTime <= now {
+				ripeCount++
+			}
+		}
+		fmt.Printf("📊 [偷菜] 其中已成熟目标: %d 个\n", ripeCount)
+
+		// 🌟 索引始终从0开始
+		startIndex := 0
+		fmt.Printf("📊 [偷菜] 起始索引: %d (始终从第一个开始)\n", startIndex)
+
+		for i := 0; i < targetCount; i++ {
+			// 检查是否收到停止信号
+			select {
+			case <-a.stopGardenLoop:
+				fmt.Println("🛑 [偷菜] 收到停止信号，中断偷菜")
+				return
+			default:
+			}
+
+			// 🌟 每次尝试前重新获取最新列表
+			a.stealingMutex.RLock()
+			currentTargets = a.stealTargets
+			currentCount := len(currentTargets)
+			a.stealingMutex.RUnlock()
+
+			if currentCount == 0 {
+				fmt.Println("📝 [偷菜] 目标列表已空，退出本次轮回")
+				return
+			}
+
+			// 如果列表变小了，调整循环
+			if currentCount < targetCount {
+				fmt.Printf("📊 [偷菜] 目标列表从 %d 减少到 %d，重新开始\n", targetCount, currentCount)
+				targetCount = currentCount
+				i = 0 // 重新开始循环
+			}
+
+			idx := i // 🌟 直接从0开始顺序尝试，不使用取模
+			if idx >= currentCount {
+				fmt.Println("📝 [偷菜] 已到达列表末尾，退出本次轮回")
+				return
+			}
+
+			target := currentTargets[idx]
+
+			fmt.Printf("\n--- [偷菜] 尝试目标 %d/%d (索引: %d) ---\n", i+1, currentCount, idx)
 			fmt.Printf("📋 [偷菜] 目标详情: UID=%s, 昵称=%s, 作物=%s, 坑位=%s, 成熟时间=%d\n",
 				target.UID, target.Nickname, target.Name, target.Pos, target.MatureTime)
 
 			// 检查是否成熟
 			if target.MatureTime > now {
 				timeLeft := (target.MatureTime - now) / 1000
-				fmt.Printf("⏳ [偷菜] 目标还未成熟，还需 %d 秒，跳过\n", timeLeft)
+				timeLeftStr := formatDuration(timeLeft)
+				fmt.Printf("⏳ [偷菜] 目标还未成熟，还需 %s，跳过（不移除，下次轮回继续检查）\n", timeLeftStr)
 				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": fmt.Sprintf("🌱 目标 [%s] 还未成熟，跳过",
-						target.Name),
+					"message": fmt.Sprintf("🌱 %s 的 %s 还未成熟（还需%s），跳过本次轮回",
+						target.Nickname, target.Name, timeLeftStr),
 					"type": "info",
 				})
+				// ✅ 不移除，只是跳过本次轮回
 				continue
 			}
-			fmt.Println("✅ [偷菜] 目标已成熟")
+			fmt.Println("✅ [偷菜] 目标已成熟，准备偷取")
 
 			wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-				"message": fmt.Sprintf("🌱 尝试偷取 %s 的 %s (坑位: %s)",
-					target.Nickname, target.Name, target.Pos),
+				"message": fmt.Sprintf("🌱 尝试偷取 %s 的 %s",
+					target.Nickname, target.Name),
 				"type": "info",
 			})
 
 			// 构建偷菜指令
-			uidHex := fmt.Sprintf("%08X", target.UID)
+			uidInt, _ := strconv.ParseUint(target.UID, 10, 64)
+			uidHex := fmt.Sprintf("%08X", uidInt)
 			stealPacket := fmt.Sprintf("14000000991700000072534F82410092CD%sCE%s",
 				target.Pos, uidHex)
 
@@ -3294,27 +3339,43 @@ func (a *App) runVeggieTask(config map[string]interface{}) {
 			if !stealSuccess {
 				fmt.Println("❌ [偷菜] 偷菜失败（服务器返回失败或超时）")
 				wailsRuntime.EventsEmit(a.ctx, "task_progress", map[string]interface{}{
-					"message": fmt.Sprintf("🌱 偷菜失败（可能已被偷），移除目标并尝试下一个"),
+					"message": fmt.Sprintf("🌱 偷菜失败（可能已达偷取上限），移除目标"),
 					"type":    "warning",
 				})
 
-				// 从目标列表中移除当前目标
+				// 🌟 只有失败时才移除目标（可能已达偷取上限）
 				fmt.Printf("📝 [偷菜] 从目标列表中移除索引 %d\n", idx)
 				a.stealingMutex.Lock()
-				oldCount := len(a.stealTargets)
-				a.stealTargets = append(a.stealTargets[:idx], a.stealTargets[idx+1:]...)
-				newCount := len(a.stealTargets)
-				fmt.Printf("📊 [偷菜] 目标列表: %d -> %d\n", oldCount, newCount)
 
-				if newCount > 0 {
-					a.stealIndex = idx % newCount
-					fmt.Printf("📊 [偷菜] 更新偷菜索引为: %d\n", a.stealIndex)
-				} else {
+				// 找到当前目标在最新列表中的实际索引
+				actualIdx := -1
+				for j, t := range a.stealTargets {
+					if t.UID == target.UID && t.Pos == target.Pos {
+						actualIdx = j
+						break
+					}
+				}
+
+				if actualIdx != -1 {
+					oldCount := len(a.stealTargets)
+					a.stealTargets = append(a.stealTargets[:actualIdx], a.stealTargets[actualIdx+1:]...)
+					// 通知前端
+					wailsRuntime.EventsEmit(a.ctx, "steal_target_removed", map[string]interface{}{
+						"uid": target.UID,
+						"pos": target.Pos,
+					})
+					newCount := len(a.stealTargets)
+					fmt.Printf("📊 [偷菜] 目标列表: %d -> %d\n", oldCount, newCount)
+
+					// 🌟 索引重置为0（始终从第一个开始）
 					a.stealIndex = 0
-					fmt.Println("📊 [偷菜] 目标列表为空，重置索引为0")
+					fmt.Printf("📊 [偷菜] 重置索引为: 0\n")
+				} else {
+					fmt.Println("⚠️ [偷菜] 目标已不在列表中，可能已被其他协程移除")
 				}
 				a.stealingMutex.Unlock()
 
+				// 🌟 移除后重新开始循环
 				continue
 			}
 
@@ -3325,25 +3386,13 @@ func (a *App) runVeggieTask(config map[string]interface{}) {
 				"type":    "success",
 			})
 
-			// 从目标列表中移除已偷成功的
-			fmt.Printf("📝 [偷菜] 从目标列表中移除已偷成功的索引 %d\n", idx)
-			a.stealingMutex.Lock()
-			oldCount := len(a.stealTargets)
-			a.stealTargets = append(a.stealTargets[:idx], a.stealTargets[idx+1:]...)
-			newCount := len(a.stealTargets)
-			fmt.Printf("📊 [偷菜] 目标列表: %d -> %d\n", oldCount, newCount)
+			// 🌟 成功时不移除目标，也不更新索引
+			// 同一块地可以偷4次，继续尝试偷这个目标
+			fmt.Println("✅ [偷菜] 本次偷菜成功，等待下个轮回继续尝试同一目标")
+			fmt.Printf("📊 [偷菜] 保持当前索引: %d，下次轮回继续偷取 %s 的 %s\n",
+				idx, target.Nickname, target.Name)
 
-			if newCount > 0 {
-				a.stealIndex = idx % newCount
-				fmt.Printf("📊 [偷菜] 更新偷菜索引为: %d\n", a.stealIndex)
-			} else {
-				a.stealIndex = 0
-				fmt.Println("📊 [偷菜] 目标列表为空，重置索引为0")
-			}
-			a.stealingMutex.Unlock()
-
-			fmt.Println("✅ [偷菜] 本次偷菜轮回完成，等待下个轮回")
-			// 偷成功就退出，等下一个轮回
+			// 偷成功就退出，等下一个轮回（防止同一轮回偷多个触发风控）
 			return
 		}
 
@@ -4000,19 +4049,23 @@ func (a *App) UpdateStealTargets(targets []Veggie) {
 	a.stealingMutex.Lock()
 	defer a.stealingMutex.Unlock()
 
-	// 过滤掉已经成熟时间过去的菜
-	now := time.Now().UnixMilli()
-	validTargets := []Veggie{}
-	for _, t := range targets {
-		if t.MatureTime > now {
-			validTargets = append(validTargets, t)
-		}
-	}
-
-	a.stealTargets = validTargets
+	// 🌟 关键修改：不过滤，保留所有目标
+	a.stealTargets = targets
 	a.stealIndex = 0 // 重置索引
 
-	fmt.Printf("🌱 偷菜目标已更新：%d 个待偷\n", len(validTargets))
+	fmt.Printf("🌱 偷菜目标已更新：共收到 %d 个目标（含未成熟）\n", len(targets))
+
+	// 可选：打印统计信息
+	now := time.Now().UnixMilli()
+	ripe := 0
+	for _, t := range targets {
+		if t.MatureTime <= now {
+			ripe++
+		}
+	}
+	if ripe > 0 {
+		fmt.Printf("  其中 %d 个已成熟可偷\n", ripe)
+	}
 }
 
 // PushVeggieResultsToWeChat 推送扫菜结果到微信
