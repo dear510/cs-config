@@ -4,6 +4,9 @@
     "monthlyGuildReward": {
       "bet_prize": "0D0000004B180000002824358241009115",
       "ticket_prize": "0D0000004A180000002898728241009115"
+    },
+    "monthlyRaceGamble": {
+      "bet_coin": "0E000000D31A000000A01C398F410092130A"
     }
   },
   "garden_veggie": {
