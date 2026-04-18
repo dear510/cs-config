@@ -6,7 +6,8 @@
       "ticket_prize": "0D0000004A180000002898728241009115"
     },
     "monthlyRaceGamble": {
-      "bet_coin": "0E000000D31A000000A01C398F410092130A"
+      "bet_coin": "0E000000D31A000000A01C398F410092130A",
+      "collect_key": "0E000000CB1A000000301398F410092130A"
     }
   },
   "garden_veggie": {
