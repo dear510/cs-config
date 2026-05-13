@@ -8,7 +8,8 @@
     "monthlyRaceGamble": {
       "bet_coin": "0E000000D31A000000A01C398F410092140A",
       "collect_key": "0E000000CB1A000000301C398F410092140A",
-      "check_group_base_packet": "10000000CF1A000000A01C398F410094140A"
+      "check_group_base_packet": "10000000CF1A000000A01C398F410094140A",
+      "build_bet_base_packet": "D11A000000A01C398F410095140A"
     }
   },
   "garden_veggie": {
