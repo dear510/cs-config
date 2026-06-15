@@ -1,15 +1,15 @@
 {
-  "version": "2026.06.11",
+  "version": "2026.06.15",
   "gamble": {
     "monthlyGuildReward": {
       "bet_prize": "0D0000004B180000002824358241009117",
       "ticket_prize": "0D0000004A180000002898728241009117"
     },
     "monthlyRaceGamble": {
-      "bet_coin": "0E000000D31A000000A01C398F410092140A",
-      "collect_key": "0E000000CB1A000000301C398F410092140A",
-      "check_group_base_packet": "10000000CF1A000000A01C398F410094140A",
-      "build_bet_base_packet": "D11A000000A01C398F410095140A"
+      "bet_coin": "0E000000D31A000000A01C398F410092150A",
+      "collect_key": "0E000000CB1A000000301C398F410092150A",
+      "check_group_base_packet": "10000000CF1A000000A01C398F410094150A",
+      "build_bet_base_packet": "D11A000000A01C398F410095150A"
     }
   },
   "garden_veggie": {
